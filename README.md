@@ -10,8 +10,8 @@ Scrapers open source para bancos chilenos. Obtén tus movimientos bancarios y sa
 |-------|----|--------|
 | Banco Falabella | `falabella` | ✅ Funcional |
 | Banco BICE | `bice` | ✅ Funcional |
+| Banco Santander | `santander` | ⚠️ Experimental |
 | Banco de Chile | `bchile` | 🔜 Próximamente |
-| Banco Santander | `santander` | 🔜 Próximamente |
 | BCI | `bci` | 🔜 Próximamente |
 | Banco Estado | `estado` | 🔜 Próximamente |
 
@@ -60,8 +60,13 @@ export BICE_PASS=tu_clave
 ## Opcional:  
 export BICE_MONTHS=1 
 
+# Banco Santander
+export SANTANDER_RUT=12345678-9
+export SANTANDER_PASS=tu_clave
+
 # Consultar banco
 npx open-banking-chile --bank falabella --pretty
+npx open-banking-chile --bank santander --pretty
 
 # Solo movimientos
 npx open-banking-chile --bank falabella --movements | jq .
@@ -72,6 +77,18 @@ npx open-banking-chile --list
 # Con screenshots para debugging
 npx open-banking-chile --bank falabella --screenshots --pretty
 ```
+
+**Santander (alcance actual):**
+
+- Extrae movimientos de **Cuenta Corriente** y **Cuenta Vista** (si existen).
+- Extrae movimientos de **Tarjeta de Crédito**:
+  - `MOVIMIENTOS POR FACTURAR`
+  - `MOVIMIENTOS FACTURADOS`
+- En `description`, agrega prefijos para distinguir origen:
+  - `[Cuenta Corriente ...]`
+  - `[Cuenta Vista ...]`
+  - `[TC Por Facturar]`
+  - `[TC Facturados]`
 
 **Opciones CLI:**
 
@@ -139,6 +156,42 @@ if (result.success) {
 }
 ```
 
+### Output Santander (ejemplo)
+
+```json
+{
+  "success": true,
+  "bank": "santander",
+  "movements": [
+    {
+      "date": "15-03-2026",
+      "description": "[Cuenta Corriente 0 000 00 00000 0] TRANSFERENCIA A TERCEROS",
+      "amount": -25000,
+      "balance": 1285000
+    },
+    {
+      "date": "14-03-2026",
+      "description": "[Cuenta Vista 0 000 00 00000 0] DEPÓSITO RECIBIDO",
+      "amount": 42000,
+      "balance": 185000
+    },
+    {
+      "date": "13-03-2026",
+      "description": "[TC Por Facturar] COMPRA COMERCIO DEMO",
+      "amount": -15990,
+      "balance": 0
+    },
+    {
+      "date": "01-03-2026",
+      "description": "[TC Facturados] PAGO TARJETA DE CRÉDITO",
+      "amount": 70000,
+      "balance": 0
+    }
+  ],
+  "balance": 1285000
+}
+```
+
 ## Seguridad
 
 - **Tus credenciales nunca salen de tu máquina**. Todo corre 100% local.
@@ -181,9 +234,15 @@ interface BankScraper {
 | Problema | Solución |
 |----------|----------|
 | Chrome no encontrado | Instala Chrome o usa `CHROME_PATH=/ruta/chrome` |
-| 2FA / Clave dinámica | El scraper no puede pasar 2FA — es una limitación de seguridad |
+| 2FA / Clave dinámica | Si aparece, apruébalo manualmente en tu banco y vuelve a intentar |
 | 0 movimientos | Usa `--screenshots --pretty` y revisa el debug log |
 | Login falla | Verifica RUT y clave, prueba con `--headful` |
+
+### Limitaciones actuales Santander
+
+- El campo `balance` representa la cuenta principal de movimientos (no resume todos los productos).
+- Los movimientos de TC se entregan junto a los bancarios en el mismo array, diferenciados por prefijo en `description`.
+- Cartolas históricas fuera de las vistas cargadas por defecto del portal no están incluidas automáticamente.
 
 ## License
 

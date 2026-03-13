@@ -11,7 +11,7 @@ Scrapers open source para bancos chilenos. Obtén tus movimientos bancarios y sa
 | Banco Falabella | `falabella` | ✅ Funcional |
 | Banco BICE | `bice` | ✅ Funcional |
 | Banco Santander | `santander` | ✅ Funcional |
-| Banco de Chile | `bchile` | ✅ Funcional |
+| Banco de Chile | `bchile` | 🟡 Solo saldo |
 | BCI | `bci` | 🔜 Próximamente |
 | Banco Estado | `estado` | 🔜 Próximamente |
 

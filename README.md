@@ -44,17 +44,18 @@ También en esta versión: utilidades compartidas (`parseChileanAmount`, `normal
 
 ## Bancos soportados
 
-| Banco                             | ID           | Estado       |
-| --------------------------------- | ------------ | ------------ |
-| Banco Falabella (cuenta + CMR TC) | `falabella`  | ✅ Funcional |
-| Banco BICE                        | `bice`       | ✅ Funcional |
-| Banco Santander                   | `santander`  | ✅ Funcional |
-| Banco Edwards                     | `edwards`    | ✅ Funcional |
-| Scotiabank                        | `scotiabank` | ✅ Funcional |
-| Banco de Chile                    | `bchile`     | ✅ Funcional |
-| BCI                               | `bci`        | ✅ Funcional |
-| Itaú                              | `itau`       | ✅ Funcional |
-| Banco Estado (CuentaRUT)          | `bestado`    | ✅ Funcional |
+| Banco                             | ID               | Estado       |
+| --------------------------------- | ---------------- | ------------ |
+| Banco Falabella (cuenta + CMR TC) | `falabella`      | ✅ Funcional |
+| Banco BICE                        | `bice`           | ✅ Funcional |
+| Banco Santander                   | `santander`      | ✅ Funcional |
+| Banco Edwards                     | `edwards`        | ✅ Funcional |
+| Scotiabank                        | `scotiabank`     | ✅ Funcional |
+| Banco de Chile                    | `bchile`         | ✅ Funcional |
+| BCI                               | `bci`            | ✅ Funcional |
+| Itaú                              | `itau`           | ✅ Funcional |
+| Banco Estado (CuentaRUT)          | `bestado`        | ✅ Funcional |
+| Banco Security                    | `bancosecurity`  | ✅ Funcional |
 
 **¿Tu banco no está?** → [Contribuir](#contribuir)
 
@@ -121,6 +122,11 @@ ITAU_PASS=tu_clave
 # Banco Estado
 BESTADO_RUT=12345678-9
 BESTADO_PASS=tu_clave
+
+# Banco Security
+BANCOSECURITY_RUT=12345678-9
+BANCOSECURITY_PASS=tu_clave
+# BANCOSECURITY_MONTHS=3  # meses históricos adicionales (default: 0)
 ```
 
 Ejecuta la librería con el comando `npx`, `dotenv` incluirá automáticamente las variables de entorno.
@@ -134,6 +140,7 @@ npx open-banking-chile --bank bchile --pretty
 npx open-banking-chile --bank edwards --pretty
 npx open-banking-chile --bank itau --pretty
 npx open-banking-chile --bank bestado --pretty
+npx open-banking-chile --bank bancosecurity --pretty
 
 # Solo movimientos
 npx open-banking-chile --bank falabella --movements | jq .
@@ -245,6 +252,15 @@ if (result.success) {
           "balance": 0,
           "source": "credit_card_billed",
           "card": "****1234"
+        },
+        {
+          "date": "31-03-2026",
+          "description": "SPOTIFY STOCKHOLM SE",
+          "amount": -8.99,
+          "balance": 0,
+          "source": "credit_card_unbilled",
+          "card": "****1234",
+          "currency": "USD"
         }
       ]
     }
@@ -264,12 +280,13 @@ Cada movimiento incluye un campo `source` que indica su origen:
 
 Campos opcionales en `BankMovement`:
 
-| Campo          | Descripción                                                                 |
-| -------------- | --------------------------------------------------------------------------- |
-| `owner`        | `"titular"` o `"adicional"` (Falabella CMR)                                 |
-| `card`         | Máscara de la tarjeta, ej: `"****8335"` (BChile, Falabella)                 |
-| `installments` | Cuotas en formato `NN/NN`, ej: `"02/06"` = cuota 2 de 6                     |
-| `totalAmount`  | Monto total de la compra cuando es en cuotas (Falabella)                    |
+| Campo          | Descripción                                                                                        |
+| -------------- | -------------------------------------------------------------------------------------------------- |
+| `owner`        | `"titular"` o `"adicional"` (Falabella CMR)                                                        |
+| `card`         | Máscara de la tarjeta, ej: `"****8335"` (BChile, Falabella)                                        |
+| `installments` | Cuotas en formato `NN/NN`, ej: `"02/06"` = cuota 2 de 6                                            |
+| `totalAmount`  | Monto total de la compra cuando es en cuotas (Falabella)                                           |
+| `currency`     | Moneda del monto, ej: `"USD"`, `"EUR"`. Ausente implica CLP. (BChile compras internacionales)      |
 
 ## Seguridad
 

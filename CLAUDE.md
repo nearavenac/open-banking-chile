@@ -1,7 +1,7 @@
 # Open Banking Chile
 
 ## What is this?
-Open source scrapers for Chilean banks. Clean architecture with three layers: infrastructure (browser lifecycle), actions (reusable scraping operations), and banks (bank-specific orchestration). 9 banks supported.
+Open source scrapers for Chilean banks. Clean architecture with three layers: infrastructure (browser lifecycle), actions (reusable scraping operations), and banks (bank-specific orchestration). 10 banks supported.
 
 ## Project structure
 ```
@@ -23,7 +23,7 @@ src/
     two-factor.ts          — 2FA detection and wait (configurable keywords/timeout)
   banks/
     falabella.ts, bchile.ts, bci.ts, bestado.ts, bice.ts,
-    edwards.ts, itau.ts, santander.ts, scotiabank.ts
+    edwards.ts, itau.ts, santander.ts, scotiabank.ts, bancosecurity.ts
 ```
 
 ## How to help the user

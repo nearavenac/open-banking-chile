@@ -208,6 +208,37 @@ export function normalizeInstallments(raw?: string): string | undefined {
   return `${match[1].padStart(2, "0")}/${match[2].padStart(2, "0")}`;
 }
 
+const CURRENCY_CODE_RE = /^[A-Z]{3}$/;
+
+/**
+ * Normaliza un código de moneda ISO 4217 a mayúsculas.
+ * Devuelve undefined si el valor es vacío, inválido, o es "CLP"
+ * (ausencia de currency implica CLP por convención en BankMovement).
+ */
+export function normalizeCurrency(raw: string | undefined): string | undefined {
+  const code = raw?.trim().toUpperCase();
+  return code && CURRENCY_CODE_RE.test(code) && code !== "CLP" ? code : undefined;
+}
+
+/** ISO 4217 numeric code for CLP — absent currency implies CLP in BankMovement */
+export const CLP_ISO_NUMERIC = 152;
+
+/** ISO 4217 numeric → alpha codes for currencies common in Chilean bank portals */
+export const ISO4217_NUMERIC: Record<number, string> = {
+  840: "USD", 978: "EUR", 826: "GBP", 392: "JPY",
+  124: "CAD",  36: "AUD", 756: "CHF", 986: "BRL",
+};
+
+/**
+ * Convierte código ISO 4217 numérico a alfa (ej: 840 → "USD").
+ * Retorna undefined para CLP (152) y para códigos desconocidos.
+ * El caller decide el fallback para códigos no mapeados.
+ */
+export function isoNumericToAlpha(code: number | undefined): string | undefined {
+  if (!code || code === CLP_ISO_NUMERIC) return undefined;
+  return ISO4217_NUMERIC[code];
+}
+
 /**
  * Normaliza el campo owner a valores fijos.
  * "Titular" / "TITULAR" → "titular", "Adicional" / "ADICIONAL" → "adicional"

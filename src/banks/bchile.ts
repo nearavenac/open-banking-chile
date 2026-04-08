@@ -1,7 +1,7 @@
 import type { Page } from "puppeteer-core";
 import type { BankMovement, BankScraper, CreditCardBalance, MovementSource, ScrapeResult, ScraperOptions } from "../types.js";
 import { MOVEMENT_SOURCE } from "../types.js";
-import { closePopups, delay, formatRut, monthYearLabel, normalizeDate, deduplicateMovements, deduplicateAcrossSources, normalizeInstallments } from "../utils.js";
+import { closePopups, delay, formatRut, monthYearLabel, normalizeDate, deduplicateMovements, deduplicateAcrossSources, normalizeInstallments, normalizeCurrency, isoNumericToAlpha } from "../utils.js";
 import { runScraper } from "../infrastructure/scraper-runner.js";
 import type { BrowserSession } from "../infrastructure/browser.js";
 import { detect2FA, waitFor2FA } from "../actions/two-factor.js";
@@ -21,10 +21,10 @@ const TWO_FACTOR_CONFIG = {
 interface ApiProduct { id: string; numero: string; mascara: string; codigo: string; codigoMoneda: string; label: string; tipo: string; claseCuenta: string; tarjetaHabiente: string | null; descripcionLogo: string; tipoCliente: string; }
 interface ApiCardInfo { titular: boolean; marca: string; tipo: string; idProducto: string; numero: string; }
 interface ApiCardSaldo { cupoTotalNacional: number; cupoUtilizadoNacional: number; cupoDisponibleNacional: number; cupoTotalInternacional: number; cupoUtilizadoInternacional: number; cupoDisponibleInternacional: number; }
-interface ApiMovNoFactur { origenTransaccion: string; fechaTransaccionString: string; montoCompra: number; glosaTransaccion: string; despliegueCuotas: string; }
+interface ApiMovNoFactur { origenTransaccion: string; fechaTransaccionString: string; montoCompra: number; glosaTransaccion: string; despliegueCuotas: string; codigoMonedaOrigen?: number; }
 interface ApiNoFacturResponse { fechaProximaFacturacionCalendario: string; fechaProximoVencimiento?: string; fechaVencimiento?: string; gastosPeriodo?: number; montoGastosPeriodo?: number; listaMovNoFactur: ApiMovNoFactur[]; }
 interface ApiFechaFacturacion { fechaFacturacion: string; existeEstadoCuentaNacional: string; existeEstadoCuentaInternacional: string; }
-interface ApiTransaccionFacturada { fechaTransaccionString: string; montoTransaccion: number; descripcion: string; cuotas: string; grupo: string; }
+interface ApiTransaccionFacturada { fechaTransaccionString: string; montoTransaccion: number; descripcion: string; cuotas: string; grupo: string; moneda?: string; codigoMoneda?: string; }
 interface ApiResumenNested { montoFacturado?: number; pagoMinimo?: number; fechaFacturacionActual?: string; fechaVencimientoFacturacion?: string; fechaProximaFacturacion?: string; }
 interface ApiResumenFacturado { existeEstadoCuenta: boolean; seccionOperaciones?: { transaccionesTarjetas: ApiTransaccionFacturada[] }; seccionCargosImpuestosAbonos?: { transaccionesTarjetas: ApiTransaccionFacturada[] | null }; resumen?: ApiResumenNested; totalFacturado?: number; montoTotalFacturado?: number; montoTotal?: number; fechaVencimiento?: string; fechaPago?: string; pagoMinimo?: number; montoMinimoPago?: number; montoMinimoAPagar?: number; }
 interface ApiCartolaMov { descripcion: string; monto: number; saldo: number; tipo: string; fechaContable: string; }
@@ -209,8 +209,12 @@ function cartolaMovToMovement(mov: ApiCartolaMov): BankMovement {
   return { date: normalizeDate(mov.fechaContable), description: mov.descripcion.trim(), amount: mov.tipo === "cargo" ? -Math.abs(mov.monto) : Math.abs(mov.monto), balance: mov.saldo, source: MOVEMENT_SOURCE.account };
 }
 
-function facturadoToMovement(tx: ApiTransaccionFacturada, source: MovementSource, cardMask?: string): BankMovement {
-  return { date: normalizeDate(tx.fechaTransaccionString), description: tx.descripcion.trim(), amount: tx.grupo === "pagos" ? Math.abs(tx.montoTransaccion) : -Math.abs(tx.montoTransaccion), balance: 0, source, card: cardMask, installments: normalizeInstallments(tx.cuotas) };
+function facturadoToMovement(tx: ApiTransaccionFacturada, source: MovementSource, cardMask?: string, fallbackCurrency?: string): BankMovement {
+  const mov: BankMovement = { date: normalizeDate(tx.fechaTransaccionString), description: tx.descripcion.trim(), amount: tx.grupo === "pagos" ? Math.abs(tx.montoTransaccion) : -Math.abs(tx.montoTransaccion), balance: 0, source, card: cardMask, installments: normalizeInstallments(tx.cuotas) };
+  // Prefer per-transaction fields (moneda > codigoMoneda); fallbackCurrency only when API doesn't supply either
+  const currency = normalizeCurrency(tx.moneda) ?? normalizeCurrency(tx.codigoMoneda) ?? normalizeCurrency(fallbackCurrency);
+  if (currency) mov.currency = currency;
+  return mov;
 }
 
 async function fetchAccountMovements(page: Page, products: ApiProduct[], fullName: string, rut: string, debugLog: string[]): Promise<{ movements: BankMovement[]; balance?: number }> {
@@ -291,7 +295,12 @@ async function fetchCreditCardData(page: Page, fullName: string, debugLog: strin
       const unbilledMovs: BankMovement[] = [];
       for (const mov of nf.listaMovNoFactur) {
         const amount = mov.montoCompra < 0 ? Math.abs(mov.montoCompra) : -Math.abs(mov.montoCompra);
-        unbilledMovs.push({ date: normalizeDate(mov.fechaTransaccionString), description: mov.glosaTransaccion.trim(), amount, balance: 0, source: MOVEMENT_SOURCE.credit_card_unbilled, card: mascara, installments: normalizeInstallments(mov.despliegueCuotas) });
+        // codigoMonedaOrigen is the ISO 4217 numeric code (152 = CLP, 840 = USD, etc.)
+        // BChile bills unknown foreign currencies in USD, so fall back to "USD"
+        const currency = isoNumericToAlpha(mov.codigoMonedaOrigen) ?? (mov.codigoMonedaOrigen ? "USD" : undefined);
+        const entry: BankMovement = { date: normalizeDate(mov.fechaTransaccionString), description: mov.glosaTransaccion.trim(), amount, balance: 0, source: MOVEMENT_SOURCE.credit_card_unbilled, card: mascara, installments: normalizeInstallments(mov.despliegueCuotas) };
+        if (currency) entry.currency = currency;
+        unbilledMovs.push(entry);
       }
       // periodExpenses: suma de cargos no facturados (montos negativos → gastos)
       const periodExpensesRaw = nf.gastosPeriodo ?? nf.montoGastosPeriodo;
@@ -314,7 +323,7 @@ async function fetchCreditCardData(page: Page, fullName: string, debugLog: strin
             apiPost<ApiResumenFacturado>(page, "tarjetas/estadocuenta/nacional/resumen-por-fecha", resumenBody),
             apiPost<ApiResumenFacturado>(page, "tarjetas/estadocuenta/internacional/resumen-por-fecha", resumenBody),
           ]);
-          for (const r of [nacR, intR]) {
+          for (const [r, fallback] of [[nacR, undefined], [intR, "USD"]] as const) {
             if (r.status !== "fulfilled" || !r.value.existeEstadoCuenta) continue;
             const res = r.value;
 
@@ -326,7 +335,7 @@ async function fetchCreditCardData(page: Page, fullName: string, debugLog: strin
               // Skip section-subtotal rows (e.g. "TOTAL PAGOS A LA CUENTA").
               const desc = tx.descripcion.trim().toUpperCase();
               if (desc.startsWith("TOTAL ") && desc.endsWith("A LA CUENTA")) continue;
-              movements.push(facturadoToMovement(tx, MOVEMENT_SOURCE.credit_card_billed, mascara));
+              movements.push(facturadoToMovement(tx, MOVEMENT_SOURCE.credit_card_billed, mascara, fallback));
             }
 
             // Override nextBillingDate/nextDueDate with accurate date-format values from resumen

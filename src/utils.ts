@@ -272,6 +272,19 @@ export function deduplicateMovements(movements: BankMovement[]): BankMovement[] 
 }
 
 /**
+ * Converts a DD-MM-YYYY date to a human-readable month+year label.
+ * Example: "19-03-2026" → "Marzo 2026"
+ */
+export function monthYearLabel(dateStr: string): string {
+  const monthNames = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+  const parts = dateStr.split("-");
+  if (parts.length < 3) return dateStr;
+  const monthIdx = parseInt(parts[1], 10) - 1;
+  if (monthIdx < 0 || monthIdx > 11) return dateStr;
+  return `${monthNames[monthIdx]} ${parts[2]}`;
+}
+
+/**
  * Cuando el mismo movimiento aparece en credit_card_unbilled y credit_card_billed,
  * la versión facturada (billed) prevalece.
  * Key: fecha + descripción + monto + cuotas + titular.

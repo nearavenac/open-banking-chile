@@ -91,26 +91,22 @@ async function login(page: Page, rut: string, password: string, debugLog: string
   // Fill RUT
   debugLog.push("3. Filling RUT...");
   progress("Ingresando RUT...");
-  const rutInput = page.getByRole("textbox", { name: "RUT", exact: true })
-    .or(page.locator('input[name*="rut"], input[id*="rut"], input[placeholder*="RUT"]').first());
+  // The login panel is a single step (RUT + password together). Target its ids directly:
+  // the homepage also has an unrelated "Ingresa tu RUT" promo input, so a loose
+  // placeholder/role match resolves to 2 elements and Playwright aborts (strict mode).
+  const rutInput = page.locator("input#document:visible").first();
   try {
     await rutInput.fill(rut, { timeout: 10000 });
   } catch {
     const ss = (await page.screenshot()).toString("base64");
     return { success: false, error: "No se encontró campo de RUT", screenshot: ss };
   }
-  await delay(1000);
-
-  // Advance to password step (Falabella uses two-step modal)
-  await page.keyboard.press("Enter");
-  debugLog.push("  Pressed Enter to advance to password step");
-  await delay(2000);
+  await delay(500);
 
   // Fill password
   debugLog.push("4. Filling password...");
   progress("Ingresando clave...");
-  const pwdInput = page.locator('input[type="password"]').first()
-    .or(page.getByRole("textbox", { name: /[Cc]lave/ }).first());
+  const pwdInput = page.locator("input#pass:visible, input[type='password']:visible").first();
   try {
     await pwdInput.fill(password, { timeout: 10000 });
   } catch {
@@ -123,8 +119,7 @@ async function login(page: Page, rut: string, password: string, debugLog: string
   debugLog.push("5. Submitting login...");
   progress("Iniciando sesión...");
   // Try clicking submit button, fallback to Enter
-  const submitBtn = page.locator('button[type="submit"], input[type="submit"]').first()
-    .or(page.getByRole("button", { name: /ingresar|entrar|btn-md/i }).first());
+  const submitBtn = page.getByRole("button", { name: "Ingresar", exact: true }).first();
   try {
     await submitBtn.click({ timeout: 3000 });
   } catch {
@@ -386,11 +381,25 @@ async function scrapeCreditCard(page: Page, debugLog: string[], doScreenshots: b
   if (cupoData) Object.assign(creditCard, cupoData);
 
   // Click on CMR product card
-  const cmrLink = page.getByRole("link", { name: /CMR/ }).first()
-    .or(page.locator("#cardDetail0, [id^='cardDetail']").first())
-    .or(page.locator("a, button, div").filter({ hasText: /CMR/i }).first());
+  // Candidates are tried in priority order and each is reduced with .first(). Don't merge them
+  // with .or(): the union can resolve to several elements and Playwright's isVisible()/click()
+  // then throw a strict-mode violation, which was swallowed as "card not found".
+  const cmrCandidates = [
+    page.locator("#cardDetail0, [id^='cardDetail']").first(),
+    page.getByText(/CMR\s+(Mastercard|Visa|Master)/i).first(),
+    page.getByRole("link", { name: /CMR/ }).filter({ hasNotText: /Falabella/i }).first(),
+  ];
+  let cmrLink = cmrCandidates[0];
+  let cmrFound = false;
+  for (const candidate of cmrCandidates) {
+    if (await candidate.isVisible({ timeout: 5000 }).catch(() => false)) {
+      cmrLink = candidate;
+      cmrFound = true;
+      break;
+    }
+  }
 
-  if (!(await cmrLink.isVisible({ timeout: 5000 }).catch(() => false))) {
+  if (!cmrFound) {
     debugLog.push("  [CMR] No CMR card found on dashboard");
     return { movements: [], creditCard };
   }

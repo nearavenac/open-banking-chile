@@ -158,7 +158,14 @@ async function bciLogin(
     await delay(3000);
   }
 
-  const loginError = await detectLoginError(page);
+  // BCI's rejection page ("Autentificación incorrecta") has no error/alert
+  // class and spells it "autentif", so the generic detector misses it.
+  const rejected = await page
+    .evaluate(() => /autentificaci[oó]n\s+incorrecta/i.test(document.body?.innerText ?? ""))
+    .catch(() => false);
+  const loginError = rejected
+    ? "Autentificación incorrecta (verifica RUT y clave de internet)"
+    : await detectLoginError(page);
   if (loginError) {
     const ss = await page.screenshot({ encoding: "base64" });
     return { success: false, error: `Error del banco: ${loginError}`, screenshot: ss as string };

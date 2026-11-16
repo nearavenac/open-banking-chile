@@ -9,7 +9,8 @@ import { DebugLog, delay, deduplicateAcrossSources, deduplicateMovements, findCh
 
 const BANK_URL = "https://www.bancofalabella.cl";
 const MAX_PAGES = 20;
-const CMR_WAIT_MS = 30_000;
+// Returns as soon as the card's table renders; the long ceiling is for slow connections (metered proxy).
+const CMR_WAIT_MS = 90_000;
 const EMPTY_CARD_MOVEMENTS_ERROR =
   "La tarjeta CMR informa cupo utilizado pero no se pudo leer ningún movimiento (carga incompleta, p. ej. por una conexión lenta). Reintenta la sincronización.";
 const BANK_REFUSED_LOGIN_ERROR =
@@ -542,7 +543,8 @@ async function waitForCmrContent(page: Page, timeoutMs: number): Promise<void> {
   try {
     await page.waitForFunction((host: string) => {
       const el = document.querySelector(host) as Element & { shadowRoot?: ShadowRoot };
-      if (!el?.shadowRoot) return false;
+      // Some variants of the card page render the table in the regular DOM, with no shadow host
+      if (!el?.shadowRoot) return document.querySelectorAll("table tbody tr td").length > 0;
       function collectAll(root: ShadowRoot | Element): Array<ShadowRoot | Element> {
         const found: Array<ShadowRoot | Element> = [root];
         for (const child of Array.from((root as Element).querySelectorAll("*"))) {
@@ -747,8 +749,8 @@ async function paginateCmrMovements(page: Page, source: MovementSource, debugLog
         const shadowEl = document.querySelector(h) as Element & { shadowRoot?: ShadowRoot };
         const topRoot = shadowEl?.shadowRoot || document;
 
-        function collectAll(root: ShadowRoot | Element | Document): Array<ShadowRoot | Element> {
-          const found: Array<ShadowRoot | Element> = root instanceof Document ? [] : [root as Element];
+        function collectAll(root: ShadowRoot | Element | Document): Array<ShadowRoot | Element | Document> {
+          const found: Array<ShadowRoot | Element | Document> = [root];
           for (const el of Array.from((root as ParentNode).querySelectorAll("*"))) {
             const sr = (el as Element & { shadowRoot?: ShadowRoot }).shadowRoot;
             if (sr) found.push(...collectAll(sr));
@@ -866,6 +868,23 @@ async function paginateCmrMovements(page: Page, source: MovementSource, debugLog
     );
 
     debugLog.push(`  [CMR pag] page ${i + 1}: ${result.rows.length} rows`);
+    if (i === 0 && result.rows.length === 0) {
+      const diag = await page.evaluate(() => {
+        const host = document.querySelector("credit-card-movements") as (Element & { shadowRoot?: ShadowRoot }) | null;
+        const tables = Array.from(document.querySelectorAll("table"));
+        const shadowTables = host?.shadowRoot ? Array.from(host.shadowRoot.querySelectorAll("table")) : [];
+        const visible = (t: Element) => { const r = t.getBoundingClientRect(); return r.width > 0 || r.height > 0; };
+        const sample = (shadowTables[0] ?? tables[0])?.querySelector("tbody tr");
+        return {
+          url: location.pathname,
+          host: !!host, shadowRoot: !!host?.shadowRoot,
+          lightTables: tables.length, shadowTables: shadowTables.length,
+          visibleTables: [...tables, ...shadowTables].filter(visible).length,
+          sampleCells: sample ? Array.from(sample.querySelectorAll("td")).map(c => (c as HTMLElement).innerText.trim().slice(0, 25)) : null,
+        };
+      }).catch(() => null);
+      debugLog.push(`  [CMR diag] ${JSON.stringify(diag)}`);
+    }
     all.push(...result.rows);
 
     if (!result.clicked) break;
@@ -877,8 +896,8 @@ async function paginateCmrMovements(page: Page, source: MovementSource, debugLog
       ({ host: h, prev, billed }: { host: string; prev: string; billed: boolean }) => {
         const el = document.querySelector(h) as Element & { shadowRoot?: ShadowRoot };
         const topRoot = el?.shadowRoot || document;
-        function collectAll(root: ShadowRoot | Element | Document): Array<ShadowRoot | Element> {
-          const found: Array<ShadowRoot | Element> = root instanceof Document ? [] : [root as Element];
+        function collectAll(root: ShadowRoot | Element | Document): Array<ShadowRoot | Element | Document> {
+          const found: Array<ShadowRoot | Element | Document> = [root];
           for (const child of Array.from((root as ParentNode).querySelectorAll("*"))) {
             const sr = (child as Element & { shadowRoot?: ShadowRoot }).shadowRoot;
             if (sr) found.push(...collectAll(sr));

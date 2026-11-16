@@ -63,6 +63,28 @@ async function screenshotIfEnabled(page: Page, name: string, enabled: boolean, d
   return undefined;
 }
 
+// ─── Blocking modal ──────────────────────────────────────────────
+
+/**
+ * The bank sometimes shows a message modal (ModalMessage overlay) after login or navigation.
+ * It sits on top of the whole page and intercepts every click behind it, so close it first.
+ */
+async function dismissBlockingModal(page: Page, debugLog: string[]): Promise<void> {
+  const overlay = page.locator('[class*="ModalMessage_overlay"]').first();
+  if (!(await overlay.isVisible({ timeout: 1500 }).catch(() => false))) return;
+
+  debugLog.push("  Blocking modal detected, dismissing...");
+  const button = overlay
+    .locator("button, [role='button'], a")
+    .filter({ hasText: /^\s*(Entendido|Aceptar|Continuar|Cerrar|Cerrar mensaje|Ok|×|x|✕)\s*$/i })
+    .first();
+  const clicked = await button.click({ timeout: 3000 }).then(() => true, () => false);
+  if (!clicked) await page.keyboard.press("Escape");
+  await overlay.waitFor({ state: "hidden", timeout: 5000 }).catch(() => {
+    debugLog.push("  Modal still visible after dismiss attempt");
+  });
+}
+
 // ─── Login ───────────────────────────────────────────────────────
 
 async function login(page: Page, rut: string, password: string, debugLog: string[], doScreenshots: boolean, progress: (s: string) => void): Promise<{ success: true } | { success: false; error: string; screenshot?: string }> {
@@ -135,6 +157,7 @@ async function login(page: Page, rut: string, password: string, debugLog: string
     const closeBtn = page.getByRole("button", { name: "cerrar", exact: true });
     if (await closeBtn.isVisible({ timeout: 2000 }).catch(() => false)) await closeBtn.click();
   } catch { /* no popup */ }
+  await dismissBlockingModal(page, debugLog);
 
   // Retry if products failed to load
   try {
@@ -172,6 +195,7 @@ async function login(page: Page, rut: string, password: string, debugLog: string
 async function scrapeAccountMovements(page: Page, debugLog: string[], doScreenshots: boolean, progress: (s: string) => void): Promise<{ movements: BankMovement[]; balance?: number }> {
   debugLog.push("7. [Cuenta] Looking for account...");
   progress("Buscando cartola de cuenta...");
+  await dismissBlockingModal(page, debugLog);
 
   // Try clicking on Cuenta Corriente product card
   const ccLink = page.getByRole("link", { name: /Cuenta Corriente \d/ });
@@ -203,8 +227,11 @@ async function scrapeAccountMovements(page: Page, debugLog: string[], doScreensh
     // Try clicking any account-like element
     const acctEl = page.locator("a, div, button").filter({ hasText: /cuenta corriente|cuenta vista/i }).first();
     if (await acctEl.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await acctEl.click();
-      await delay(4000);
+      // Last resort: the match can be a layout wrapper, so a failed click must not abort the whole scrape.
+      await acctEl.click({ timeout: 5000 }).then(
+        () => delay(4000),
+        () => { debugLog.push("  Account fallback click failed, continuing without account movements"); },
+      );
     }
   }
 
@@ -902,7 +929,13 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
     await screenshotIfEnabled(page, "04-post-login", doScreenshots, debugLog);
 
     // Phase 1: Account movements
-    const { movements: accountMovements, balance } = await scrapeAccountMovements(page, debugLog, doScreenshots, progress);
+    // CMR is a card-only product: a failure here (no checking account page) must not lose the card scrape.
+    const { movements: accountMovements, balance } = await scrapeAccountMovements(page, debugLog, doScreenshots, progress).catch(
+      (err: unknown): { movements: BankMovement[]; balance?: number } => {
+        debugLog.push(`  Account phase failed: ${err instanceof Error ? err.message.split("\n")[0] : String(err)}`);
+        return { movements: [] };
+      },
+    );
 
     // Phase 2: CMR credit card — navigate back to dashboard first
     debugLog.push("  Navigating back to dashboard for CMR...");
@@ -915,6 +948,7 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
       const closeBtn = page.getByRole("button", { name: "cerrar", exact: true });
       if (await closeBtn.isVisible({ timeout: 2000 }).catch(() => false)) await closeBtn.click();
     } catch { /* no popup */ }
+    await dismissBlockingModal(page, debugLog);
 
     const { creditCard } = await scrapeCreditCard(page, debugLog, doScreenshots, progress, owner);
 

@@ -63,7 +63,8 @@ async function itauLogin(
   await doSave(page, "03-after-submit");
 
   // Imperva may answer with a human-verification page (hCaptcha) instead of the portal. Don't report it as a successful login.
-  const challenged = await page.evaluate(() => /Additional security check|confirma que eres humano|hcaptcha/i.test(document.body?.innerText ?? "")).catch(() => false);
+  // The challenge lives in an Imperva iframe, so look at the HTML and not at the visible text.
+  const challenged = await page.content().then((html) => /_Incapsula_Resource|Incapsula incident|hcaptcha/i.test(html)).catch(() => false);
   if (challenged) {
     return { success: false, error: HUMAN_CHECK_ERROR };
   }

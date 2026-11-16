@@ -68,6 +68,13 @@ async function launchPlaywright(options: ScraperOptions): Promise<{ browser: Bro
     Object.defineProperty(navigator, "webdriver", { get: () => false });
   });
 
+  // Through a metered proxy the pages are slow and costly: the scrape only needs text, so skip images, fonts and media.
+  if (options.proxy) {
+    await context.route("**/*", (route) =>
+      ["image", "font", "media"].includes(route.request().resourceType()) ? route.abort() : route.continue(),
+    );
+  }
+
   const page = await context.newPage();
   return { browser, page, debugLog };
 }

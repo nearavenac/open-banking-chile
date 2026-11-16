@@ -128,9 +128,10 @@ export interface ScraperOptions extends BankCredentials {
   /** Si es true, usa headless: false (para debugging visual) */
   headful?: boolean;
   /**
-   * URL de depuración de un Chrome ya abierto (ej. "http://127.0.0.1:9222"). En vez de lanzar un navegador e
-   * iniciar sesión, el scraper se conecta a esa ventana, donde la persona ya inició sesión a mano. Solo Itaú.
-   * No requiere RUT ni clave, no cierra la sesión ni el navegador.
+   * URL CDP (ej: "http://127.0.0.1:9222") de un Chrome real lanzado a mano con --remote-debugging-port. En vez de
+   * lanzar su propio navegador (que el anti-bot bloquea), el scraper se conecta a esa ventana y lee su sesión.
+   * Si no hay sesión (o expiró) y se pasan rut/clave, inicia sesión dentro de ese mismo Chrome.
+   * Sin rut/clave solo usa una sesión ya iniciada. Nunca cierra la sesión ni el navegador. Solo Itaú.
    */
   attachTo?: string;
   /** Filtro Titular/Adicional para TC (ej: "T" = titular, "A" = adicional, "B" = todos). Default: "B" */

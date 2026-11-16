@@ -50,7 +50,12 @@ async function itauLogin(
 
   debugLog.push("4. Submitting login...");
   await doSave(page, "02-pre-submit");
-  await page.evaluate(() => { const btn = document.getElementById("btnLoginRecaptchaV3"); if (btn) btn.click(); });
+  const clickedRecaptcha = await page.evaluate(() => {
+    const btn = document.getElementById("btnLoginRecaptchaV3");
+    if (btn) btn.click();
+    return !!btn;
+  });
+  if (!clickedRecaptcha) await page.click("#btnLoginPortal");
   try { await page.waitForNavigation({ timeout: 20000 }); } catch { /* SPA */ }
   await delay(3000);
   await doSave(page, "03-after-submit");
@@ -249,36 +254,66 @@ async function scrapeItau(session: BrowserSession, options: ScraperOptions): Pro
 const SESSION_LOST_RE = /\/login|action=timeout/;
 
 /**
- * Reads an Itaú session that a person already opened in their own Chrome (started with --remote-debugging-port).
- * It performs no login and never closes the browser or the session: it only opens one extra tab and closes it.
+ * Reads the Itaú session of a Chrome that was started by hand with --remote-debugging-port (attachTo).
+ * When that Chrome has no live session and credentials were given, it logs in inside that same Chrome
+ * (a real, non-automated browser is what Itaú's anti-bot accepts). It never logs out nor closes the browser.
  */
 async function scrapeAttached(options: ScraperOptions): Promise<ScrapeResult> {
   const bank = "itau";
   const debugLog: string[] = options.onDebug ? new DebugLog(options.onDebug) : [];
+  const canLogin = Boolean(options.rut && options.password);
   let browser: Browser | undefined;
   try {
     browser = await puppeteer.connect({ browserURL: options.attachTo, defaultViewport: null });
-    const open = (await browser.pages()).find((p) => p.url().includes("banco.itau.cl") && !SESSION_LOST_RE.test(p.url()));
-    if (!open) {
-      return { success: false, bank, accounts: [], error: "No hay una sesión de Itaú abierta en ese Chrome. Inicia sesión en la ventana y vuelve a intentar." };
-    }
-    debugLog.push("0. Attached to an existing Itaú session");
+    const hasSession = async () =>
+      (await browser!.pages()).some((p) => p.url().includes("banco.itau.cl") && !SESSION_LOST_RE.test(p.url()));
 
-    const page = await browser.newPage();
-    try {
-      const result = await collectItauData(page, debugLog, async () => {}, { ...options, saveScreenshots: false });
-      if (result.success && SESSION_LOST_RE.test(page.url())) {
-        return { success: false, bank, accounts: [], error: "La sesión de Itaú expiró. Inicia sesión de nuevo en la ventana de Chrome.", debug: debugLog.join("\n") };
+    if (!(await hasSession())) {
+      if (!canLogin) {
+        return { success: false, bank, accounts: [], error: "No hay una sesión de Itaú abierta en ese Chrome. Inicia sesión en la ventana y vuelve a intentar." };
       }
-      return result;
-    } finally {
-      await page.close().catch(() => {});
+      const loginResult = await loginInAttached(browser, options, debugLog);
+      if (!loginResult.success) return { success: false, bank, accounts: [], error: loginResult.error, debug: debugLog.join("\n") };
+    } else {
+      debugLog.push("0. Attached to an existing Itaú session");
     }
+
+    const collect = async () => {
+      const page = await browser!.newPage();
+      try {
+        const result = await collectItauData(page, debugLog, async () => {}, { ...options, saveScreenshots: false });
+        return { result, expired: result.success && SESSION_LOST_RE.test(page.url()) };
+      } finally {
+        await page.close().catch(() => {});
+      }
+    };
+
+    let { result, expired } = await collect();
+    if (expired && canLogin) {
+      debugLog.push("0. Session expired, logging in again...");
+      const loginResult = await loginInAttached(browser, options, debugLog);
+      if (!loginResult.success) return { success: false, bank, accounts: [], error: loginResult.error, debug: debugLog.join("\n") };
+      ({ result, expired } = await collect());
+    }
+    if (expired) {
+      return { success: false, bank, accounts: [], error: "La sesión de Itaú expiró. Inicia sesión de nuevo en la ventana de Chrome.", debug: debugLog.join("\n") };
+    }
+    return result;
   } catch (error) {
     return { success: false, bank, accounts: [], error: `Error al conectar con Chrome (${options.attachTo}): ${error instanceof Error ? error.message : String(error)}`, debug: debugLog.join("\n") };
   } finally {
     await browser?.disconnect();
   }
+}
+
+/** Logs in on an Itaú tab of the attached Chrome (reuses one when present). The tab is left open: it holds the session. */
+async function loginInAttached(browser: Browser, options: ScraperOptions, debugLog: string[]) {
+  const pages = await browser.pages();
+  const page = pages.find((p) => p.url().includes("banco.itau.cl")) ?? (await browser.newPage());
+  await page.bringToFront().catch(() => {});
+  const result = await itauLogin(page, options.rut, options.password, debugLog, async () => {});
+  if (result.success) await closePopups(page);
+  return result;
 }
 
 /** Everything after being logged in: balance, account movements and credit cards. */

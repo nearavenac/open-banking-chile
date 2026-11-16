@@ -1,7 +1,7 @@
-import type { Page } from "puppeteer-core";
+import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import type { AccountBalance, BankMovement, BankScraper, CreditCardBalance, ScrapeResult, ScraperOptions } from "../types.js";
 import { MOVEMENT_SOURCE } from "../types.js";
-import { closePopups, delay, formatRut, parseChileanAmount, normalizeDate, deduplicateMovements, normalizeInstallments } from "../utils.js";
+import { DebugLog, closePopups, delay, formatRut, parseChileanAmount, normalizeDate, deduplicateMovements, normalizeInstallments } from "../utils.js";
 import { runScraper } from "../infrastructure/scraper-runner.js";
 import type { BrowserSession } from "../infrastructure/browser.js";
 import { detect2FA, waitFor2FA } from "../actions/two-factor.js";
@@ -231,20 +231,66 @@ async function extractCreditCardData(page: Page, debugLog: string[]): Promise<{ 
 // ─── Main scrape function ────────────────────────────────────────
 
 async function scrapeItau(session: BrowserSession, options: ScraperOptions): Promise<ScrapeResult> {
-  const { rut, password, saveScreenshots: doScreenshots } = options;
-  const { onProgress } = options;
+  const { rut, password } = options;
   const { page, debugLog, screenshot: doSave } = session;
-  const bank = "itau";
-  const progress = onProgress || (() => {});
+  const progress = options.onProgress || (() => {});
 
   progress("Abriendo sitio del banco...");
   const loginResult = await itauLogin(page, rut, password, debugLog, doSave);
   if (!loginResult.success) {
-    return { success: false, bank, accounts: [], error: loginResult.error, screenshot: loginResult.screenshot, debug: debugLog.join("\n") };
+    return { success: false, bank: "itau", accounts: [], error: loginResult.error, screenshot: loginResult.screenshot, debug: debugLog.join("\n") };
   }
 
   progress("Sesión iniciada correctamente");
   await closePopups(page);
+  return collectItauData(page, debugLog, doSave, options);
+}
+
+const SESSION_LOST_RE = /\/login|action=timeout/;
+
+/**
+ * Reads an Itaú session that a person already opened in their own Chrome (started with --remote-debugging-port).
+ * It performs no login and never closes the browser or the session: it only opens one extra tab and closes it.
+ */
+async function scrapeAttached(options: ScraperOptions): Promise<ScrapeResult> {
+  const bank = "itau";
+  const debugLog: string[] = options.onDebug ? new DebugLog(options.onDebug) : [];
+  let browser: Browser | undefined;
+  try {
+    browser = await puppeteer.connect({ browserURL: options.attachTo, defaultViewport: null });
+    const open = (await browser.pages()).find((p) => p.url().includes("banco.itau.cl") && !SESSION_LOST_RE.test(p.url()));
+    if (!open) {
+      return { success: false, bank, accounts: [], error: "No hay una sesión de Itaú abierta en ese Chrome. Inicia sesión en la ventana y vuelve a intentar." };
+    }
+    debugLog.push("0. Attached to an existing Itaú session");
+
+    const page = await browser.newPage();
+    try {
+      const result = await collectItauData(page, debugLog, async () => {}, { ...options, saveScreenshots: false });
+      if (result.success && SESSION_LOST_RE.test(page.url())) {
+        return { success: false, bank, accounts: [], error: "La sesión de Itaú expiró. Inicia sesión de nuevo en la ventana de Chrome.", debug: debugLog.join("\n") };
+      }
+      return result;
+    } finally {
+      await page.close().catch(() => {});
+    }
+  } catch (error) {
+    return { success: false, bank, accounts: [], error: `Error al conectar con Chrome (${options.attachTo}): ${error instanceof Error ? error.message : String(error)}`, debug: debugLog.join("\n") };
+  } finally {
+    await browser?.disconnect();
+  }
+}
+
+/** Everything after being logged in: balance, account movements and credit cards. */
+async function collectItauData(
+  page: Page,
+  debugLog: string[],
+  doSave: (page: Page, name: string) => Promise<void>,
+  options: ScraperOptions,
+): Promise<ScrapeResult> {
+  const bank = "itau";
+  const doScreenshots = options.saveScreenshots;
+  const progress = options.onProgress || (() => {});
 
   progress("Extrayendo saldo...");
   const balance = await extractBalance(page, debugLog);
@@ -273,7 +319,7 @@ const itau: BankScraper = {
   id: "itau",
   name: "Itaú",
   url: "https://banco.itau.cl",
-  scrape: (options) => runScraper("itau", options, {}, scrapeItau),
+  scrape: (options) => (options.attachTo ? scrapeAttached(options) : runScraper("itau", options, {}, scrapeItau)),
 };
 
 export default itau;

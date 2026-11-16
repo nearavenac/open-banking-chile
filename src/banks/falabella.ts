@@ -10,6 +10,8 @@ import { DebugLog, delay, deduplicateAcrossSources, deduplicateMovements, findCh
 const BANK_URL = "https://www.bancofalabella.cl";
 const MAX_PAGES = 20;
 const CMR_WAIT_MS = 30_000;
+const BANK_REFUSED_LOGIN_ERROR =
+  "Banco Falabella rechazó el inicio de sesión («en estos momentos no lo podemos atender»). Suele ser un bloqueo por la IP del servidor: sincroniza desde un computador en Chile (pnpm push-sync cmr_falabella) o configura un proxy chileno.";
 
 // ─── Browser helpers ─────────────────────────────────────────────
 
@@ -29,6 +31,7 @@ async function launchPlaywright(options: ScraperOptions): Promise<{ browser: Bro
   const browser = await chromium.launch({
     executablePath: execPath,
     headless: !headful,
+    ...(options.proxy && { proxy: { server: options.proxy } }),
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -151,6 +154,13 @@ async function login(page: Page, rut: string, password: string, debugLog: string
   await page.waitForLoadState("networkidle").catch(() => {});
   await delay(8000);
   await screenshotIfEnabled(page, "03-after-login", doScreenshots, debugLog);
+
+  // The bank refuses the login of some environments (e.g. datacenter IPs outside Chile) with a modal and stays on the public
+  // home: don't go on pretending the session is open.
+  if (await page.getByText(/no\s+(?:lo\s+)?podemos\s+atender/i).first().isVisible({ timeout: 1500 }).catch(() => false)) {
+    const ss = (await page.screenshot()).toString("base64");
+    return { success: false, error: BANK_REFUSED_LOGIN_ERROR, screenshot: ss };
+  }
 
   // Close post-login popups
   try {

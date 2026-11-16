@@ -134,6 +134,11 @@ export interface ScraperOptions extends BankCredentials {
    * Sin rut/clave solo usa una sesión ya iniciada. Nunca cierra la sesión ni el navegador. Solo Itaú.
    */
   attachTo?: string;
+  /**
+   * Proxy por el que sale el navegador (ej: "socks5://127.0.0.1:1080" o "http://user:pass@host:3128"). Útil cuando el banco
+   * rechaza la IP del servidor y se necesita salir por una IP chilena. Solo Falabella por ahora.
+   */
+  proxy?: string;
   /** Filtro Titular/Adicional para TC (ej: "T" = titular, "A" = adicional, "B" = todos). Default: "B" */
   owner?: "T" | "A" | "B";
   /** Callback de progreso para mostrar estado al usuario */

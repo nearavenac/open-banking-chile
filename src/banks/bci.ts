@@ -6,7 +6,7 @@ import { runScraper } from "../infrastructure/scraper-runner.js";
 import type { BrowserSession } from "../infrastructure/browser.js";
 import { detect2FA, waitFor2FA } from "../actions/two-factor.js";
 import { detectLoginError } from "../actions/login.js";
-import { createInterceptor } from "../intercept.js";
+import { createInterceptor, type Interceptor } from "../intercept.js";
 
 // ─── BCI-specific constants ──────────────────────────────────────
 
@@ -22,6 +22,24 @@ interface BciApiMovement {
   monto: string;
   tipo: string; // 'C' = cargo (debit), 'A' = abono (credit)
   glosa: string;
+}
+
+/**
+ * The frame fires several calls (accounts, balances, movements) and Interceptor.waitFor resolves on the FIRST one,
+ * which is the accounts list: the movements call usually lands a few seconds later. Wait for the response that
+ * actually carries the movements, and fall back to whatever arrived once the time is up.
+ */
+async function waitForCheckingMovements(interceptor: Interceptor, timeoutMs: number): Promise<unknown[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const all = interceptor.getAll("bci-checking");
+    if (all.some((c) => Array.isArray((c as { movimientos?: unknown }).movimientos))) {
+      await delay(500);
+      return interceptor.getAll("bci-checking");
+    }
+    await delay(500);
+  }
+  return interceptor.getAll("bci-checking");
 }
 
 export function normalizeBciApiMovements(captures: unknown[]): BankMovement[] {
@@ -453,9 +471,13 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
       await delay(3000);
 
       // Try API interception first
-      const captured = await interceptor.waitFor("bci-checking", 10_000);
+      const captured = await waitForCheckingMovements(interceptor, 25_000);
       if (captured.length > 0) {
         debugLog.push(`  Checking API: ${captured.length} response(s) captured`);
+        for (const c of captured) {
+          const o = c as { movimientos?: unknown[] } & Record<string, unknown>;
+          debugLog.push(`    capture keys=${Object.keys(o ?? {}).join(",").slice(0, 120)} movimientos=${Array.isArray(o?.movimientos) ? o.movimientos.length : "n/a"}`);
+        }
         const apiMovements = normalizeBciApiMovements(captured);
         debugLog.push(`  Checking API movements: ${apiMovements.length}`);
         if (apiMovements.length > 0) {

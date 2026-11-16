@@ -18,6 +18,8 @@ const TWO_FACTOR_CONFIG = {
 
 // ─── Itaú-specific helpers ───────────────────────────────────────
 
+const HUMAN_CHECK_ERROR = "Itaú pidió una verificación humana (hCaptcha). Resuélvela una vez a mano en el Chrome del servidor y reintenta.";
+
 async function itauLogin(
   page: Page,
   rut: string,
@@ -59,6 +61,12 @@ async function itauLogin(
   try { await page.waitForNavigation({ timeout: 20000 }); } catch { /* SPA */ }
   await delay(3000);
   await doSave(page, "03-after-submit");
+
+  // Imperva may answer with a human-verification page (hCaptcha) instead of the portal. Don't report it as a successful login.
+  const challenged = await page.evaluate(() => /Additional security check|confirma que eres humano|hcaptcha/i.test(document.body?.innerText ?? "")).catch(() => false);
+  if (challenged) {
+    return { success: false, error: HUMAN_CHECK_ERROR };
+  }
 
   // Login error check
   const errorText = await page.evaluate(() => {
@@ -268,12 +276,14 @@ async function scrapeAttached(options: ScraperOptions): Promise<ScrapeResult> {
     const hasSession = async () =>
       (await browser!.pages()).some((p) => p.url().includes("banco.itau.cl") && !SESSION_LOST_RE.test(p.url()));
 
+    let justLoggedIn = false;
     if (!(await hasSession())) {
       if (!canLogin) {
         return { success: false, bank, accounts: [], error: "No hay una sesión de Itaú abierta en ese Chrome. Inicia sesión en la ventana y vuelve a intentar." };
       }
       const loginResult = await loginInAttached(browser, options, debugLog);
       if (!loginResult.success) return { success: false, bank, accounts: [], error: loginResult.error, debug: debugLog.join("\n") };
+      justLoggedIn = true;
     } else {
       debugLog.push("0. Attached to an existing Itaú session");
     }
@@ -289,7 +299,7 @@ async function scrapeAttached(options: ScraperOptions): Promise<ScrapeResult> {
     };
 
     let { result, expired } = await collect();
-    if (expired && canLogin) {
+    if (expired && canLogin && !justLoggedIn) {
       debugLog.push("0. Session expired, logging in again...");
       const loginResult = await loginInAttached(browser, options, debugLog);
       if (!loginResult.success) return { success: false, bank, accounts: [], error: loginResult.error, debug: debugLog.join("\n") };

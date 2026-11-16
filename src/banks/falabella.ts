@@ -10,10 +10,26 @@ import { DebugLog, delay, deduplicateAcrossSources, deduplicateMovements, findCh
 const BANK_URL = "https://www.bancofalabella.cl";
 const MAX_PAGES = 20;
 const CMR_WAIT_MS = 30_000;
+const EMPTY_CARD_MOVEMENTS_ERROR =
+  "La tarjeta CMR informa cupo utilizado pero no se pudo leer ningún movimiento (carga incompleta, p. ej. por una conexión lenta). Reintenta la sincronización.";
 const BANK_REFUSED_LOGIN_ERROR =
   "Banco Falabella rechazó el inicio de sesión («en estos momentos no lo podemos atender»). Suele ser un bloqueo por la IP del servidor: sincroniza desde un computador en Chile (pnpm push-sync cmr_falabella) o configura un proxy chileno.";
 
 // ─── Browser helpers ─────────────────────────────────────────────
+
+/** Chromium ignores credentials embedded in the proxy URL: split them into Playwright's fields. */
+function toPlaywrightProxy(raw: string): { server: string; username?: string; password?: string } {
+  try {
+    const u = new URL(raw);
+    return {
+      server: `${u.protocol}//${u.host}`,
+      ...(u.username && { username: decodeURIComponent(u.username) }),
+      ...(u.password && { password: decodeURIComponent(u.password) }),
+    };
+  } catch {
+    return { server: raw };
+  }
+}
 
 async function launchPlaywright(options: ScraperOptions): Promise<{ browser: Browser; page: Page; debugLog: string[] }> {
   const { chromePath, headful, onDebug } = options;
@@ -31,7 +47,7 @@ async function launchPlaywright(options: ScraperOptions): Promise<{ browser: Bro
   const browser = await chromium.launch({
     executablePath: execPath,
     headless: !headful,
-    ...(options.proxy && { proxy: { server: options.proxy } }),
+    ...(options.proxy && { proxy: toPlaywrightProxy(options.proxy) }),
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -93,7 +109,8 @@ async function dismissBlockingModal(page: Page, debugLog: string[]): Promise<voi
 async function login(page: Page, rut: string, password: string, debugLog: string[], doScreenshots: boolean, progress: (s: string) => void): Promise<{ success: true } | { success: false; error: string; screenshot?: string }> {
   debugLog.push("1. Navigating to bank homepage...");
   progress("Abriendo sitio del banco...");
-  await page.goto(BANK_URL, { waitUntil: "networkidle" });
+  await page.goto(BANK_URL, { waitUntil: "domcontentloaded", timeout: 90_000 });
+  await page.waitForLoadState("networkidle", { timeout: 45_000 }).catch(() => {});
   await delay(2000);
 
   // Dismiss banners/popups
@@ -950,7 +967,8 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
     // Phase 2: CMR credit card — navigate back to dashboard first
     debugLog.push("  Navigating back to dashboard for CMR...");
     progress("Navegando a tarjeta de crédito...");
-    await page.goto(dashboardUrl, { waitUntil: "networkidle" });
+    await page.goto(dashboardUrl, { waitUntil: "domcontentloaded", timeout: 90_000 });
+    await page.waitForLoadState("networkidle", { timeout: 45_000 }).catch(() => {});
     await delay(2000);
 
     // Close popups again
@@ -961,6 +979,10 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
     await dismissBlockingModal(page, debugLog);
 
     const { creditCard } = await scrapeCreditCard(page, debugLog, doScreenshots, progress, owner);
+
+    if ((creditCard.national?.used ?? 0) > 0 && !creditCard.movements?.length) {
+      return { success: false, bank, error: EMPTY_CARD_MOVEMENTS_ERROR, debug: debugLog.join("\n") };
+    }
 
     const totalMov = accountMovements.length + (creditCard.movements?.length ?? 0);
     debugLog.push(`12. Total: ${accountMovements.length} account + ${creditCard.movements?.length ?? 0} TC = ${totalMov}`);

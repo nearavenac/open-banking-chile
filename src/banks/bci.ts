@@ -180,6 +180,28 @@ async function bciLogin(
   return { success: true };
 }
 
+/**
+ * After login BCI may show "Registra tu Dispositivo de confianza" (optional, CMF regulation). Until it is dismissed the
+ * menu with the account movements never loads. Only "Omitir" is ever clicked: registering a device is the user's call.
+ */
+async function skipTrustedDeviceRegistration(page: Page, debugLog: string[]): Promise<void> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const skipped = await page.evaluate(() => {
+      if (!/dispositivo de confianza/i.test(document.body?.innerText ?? "")) return false;
+      for (const el of Array.from(document.querySelectorAll("button, a"))) {
+        if ((el as HTMLElement).innerText?.trim().toLowerCase() === "omitir") {
+          (el as HTMLElement).click();
+          return true;
+        }
+      }
+      return false;
+    }).catch(() => false);
+    if (!skipped) return;
+    debugLog.push("  Registro de dispositivo de confianza omitido");
+    await delay(3000);
+  }
+}
+
 async function extractMovementsFromFrame(frame: Frame, debugLog: string[]): Promise<BankMovement[]> {
   await frame.evaluate(() => {
     for (const opt of document.querySelectorAll("a, button, span, option")) {
@@ -415,6 +437,7 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
   }
 
   progress("Sesión iniciada correctamente");
+  await skipTrustedDeviceRegistration(page, debugLog);
   await closePopups(page);
   await delay(2000);
 

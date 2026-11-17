@@ -31,7 +31,7 @@ interface BciApiMovement {
  */
 async function waitForCheckingMovements(interceptor: Interceptor, timeoutMs: number): Promise<unknown[]> {
   const deadline = Date.now() + timeoutMs;
-  const hasMovements = () => interceptor.getAll("bci-checking").some((c) => Array.isArray((c as { movimientos?: unknown }).movimientos));
+  const hasMovements = () => interceptor.getAll("bci-checking").some((c) => Array.isArray((c as { movimientos?: unknown } | null)?.movimientos));
   while (Date.now() < deadline && !hasMovements()) await delay(500);
   if (hasMovements()) await delay(500);
   return interceptor.getAll("bci-checking");
@@ -460,6 +460,8 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
   debugLog.push("5. Fetching account movements...");
   const allMovements: BankMovement[] = [];
   let balance: number | undefined;
+  // BCI answered the movements call (even with an empty list): an account with no activity is not a failed read
+  let movementsAnswered = false;
 
   if (await clickByTitle(page, "Últimos Movimientos")) {
     const movFrame = await waitForFrame(page, IFRAME_PATTERNS.movements, 15000);
@@ -468,6 +470,7 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
 
       // Try API interception first
       const captured = await waitForCheckingMovements(interceptor, 25_000);
+      movementsAnswered = captured.some((c) => Array.isArray((c as { movimientos?: unknown } | null)?.movimientos));
       if (captured.length > 0) {
         debugLog.push(`  Checking API: ${captured.length} response(s) captured`);
         const apiMovements = normalizeBciApiMovements(captured);
@@ -571,7 +574,7 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
   const deduplicated = deduplicateMovements(allMovements);
   debugLog.push(`  Total: ${deduplicated.length} unique movements`);
   // Nothing read and no balance either: the movements page never loaded. Report it instead of a "successful" empty sync.
-  if (deduplicated.length === 0 && balance === undefined && creditCards.length === 0) {
+  if (deduplicated.length === 0 && balance === undefined && creditCards.length === 0 && !movementsAnswered) {
     await doSave(page, "06-empty");
     return { success: false, bank, error: "No se pudo leer la cartola de BCI (la página de movimientos no cargó). Reintenta la sincronización.", debug: debugLog.join("\n") };
   }

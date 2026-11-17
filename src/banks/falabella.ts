@@ -960,6 +960,8 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
 
   let browser: Browser | undefined;
   let watchdog: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const timeoutError = () => `Error del scraper: tiempo máximo excedido (${Math.round((options.timeoutMs ?? 0) / 1000)}s)`;
 
   try {
     const session = await launchPlaywright(options);
@@ -968,7 +970,10 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
     // instead of being abandoned by the caller with Chromium still running.
     if (options.timeoutMs) {
       const hung = browser;
-      watchdog = setTimeout(() => void hung.close().catch(() => {}), options.timeoutMs);
+      watchdog = setTimeout(() => {
+        timedOut = true;
+        void hung.close().catch(() => {});
+      }, options.timeoutMs);
     }
     const { page, debugLog } = session;
 
@@ -1038,6 +1043,10 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
       await delay(2000);
     } catch { /* best effort */ }
 
+    // Once the browser is closed, Playwright calls wrapped in catch-alls return defaults instead of throwing:
+    // what was read by then may be empty or truncated, so it must not pass as a successful scrape.
+    if (timedOut) return { success: false, bank, accounts: [], error: timeoutError() };
+
     return {
       success: true,
       bank,
@@ -1051,7 +1060,7 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
       success: false,
       bank,
       accounts: [],
-      error: `Error del scraper: ${error instanceof Error ? error.message : String(error)}`,
+      error: timedOut ? timeoutError() : `Error del scraper: ${error instanceof Error ? error.message : String(error)}`,
     };
   } finally {
     clearTimeout(watchdog);

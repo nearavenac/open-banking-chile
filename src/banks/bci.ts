@@ -84,12 +84,19 @@ const ACCOUNT_SELECT = "bci-wk-select#cuenta select, select";
 
 // ─── BCI-specific helpers ────────────────────────────────────────
 
-async function clickByTitle(page: Page, title: string): Promise<boolean> {
-  return page.evaluate((t: string) => {
-    const link = document.querySelector(`a[title="${t}"]`) as HTMLElement | null;
-    if (link) { link.click(); return true; }
-    return false;
-  }, title);
+/** Clicks the menu link with that title, waiting for it to render: right after login the menu is still loading. */
+async function clickByTitle(page: Page, title: string, timeoutMs = 15_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const clicked = await page.evaluate((t: string) => {
+      const link = document.querySelector(`a[title="${t}"]`) as HTMLElement | null;
+      if (link) { link.click(); return true; }
+      return false;
+    }, title).catch(() => false); // the context is destroyed while the page navigates: try again
+    if (clicked) return true;
+    await delay(500);
+  } while (Date.now() < deadline);
+  return false;
 }
 
 async function waitForFrame(page: Page, urlPattern: string, timeoutMs = 10000): Promise<Frame | null> {
@@ -98,6 +105,52 @@ async function waitForFrame(page: Page, urlPattern: string, timeoutMs = 10000): 
     const frame = page.frames().find((f) => f.url().includes(urlPattern));
     if (frame) return frame;
     await delay(500);
+  }
+  return null;
+}
+
+/**
+ * The card selector ("BciPlus+ Visa Platinum - 9567") sits inside one of the page's frames, not always the top
+ * document: look in every frame, preferring `select.tdc`, else any select whose options end in a 4-digit card number.
+ */
+async function readCardLabels(page: Page, debugLog: string[]): Promise<string[]> {
+  for (const frame of page.frames()) {
+    const selects = await frame.evaluate(() =>
+      Array.from(document.querySelectorAll("select")).map((el) => ({
+        cls: el.className,
+        options: Array.from(el.options).map((o) => o.textContent?.trim() || ""),
+      })),
+    ).catch(() => [] as { cls: string; options: string[] }[]);
+    if (selects.length === 0) continue;
+    debugLog.push(`  Frame ${frame.url().split("?")[0].slice(-50)}: ${selects.map((x) => `select.${x.cls || "?"}[${x.options.length}]`).join(" ")}`);
+    const match = selects.find((x) => /(^|\s)tdc(\s|$)/.test(x.cls)) ?? selects.find((x) => x.options.length > 0 && x.options.every((o) => /\d{4}\s*$/.test(o)));
+    if (match) return match.options.filter(Boolean);
+  }
+  return [];
+}
+
+interface BciCupo {
+  nationalUsed: number; nationalAvailable: number; nationalTotal: number;
+  internationalUsed: number; internationalAvailable: number; internationalTotal: number;
+}
+
+/** The cards home already shows "Monto Nacional/Internacional Disponible/Utilizado": read it from whichever frame has it. */
+async function readCupoFromFrames(page: Page): Promise<BciCupo | null> {
+  for (const frame of page.frames()) {
+    const text = await frame.evaluate(() => document.body?.innerText ?? "").catch(() => "");
+    if (!/monto nacional/i.test(text)) continue;
+    const amount = (re: RegExp): number => {
+      const m = text.match(re);
+      return m ? parseInt(m[1].split(",")[0].replace(/\D/g, ""), 10) || 0 : 0;
+    };
+    const nationalAvailable = amount(/monto nacional disponible\s*\$\s*([\d.,]+)/i);
+    const nationalUsed = amount(/monto nacional utilizado\s*\$\s*([\d.,]+)/i);
+    const internationalAvailable = amount(/monto internacional disponible\s*US\$\s*([\d.,]+)/i);
+    const internationalUsed = amount(/monto internacional utilizado\s*US\$\s*([\d.,]+)/i);
+    return {
+      nationalUsed, nationalAvailable, nationalTotal: nationalUsed + nationalAvailable,
+      internationalUsed, internationalAvailable, internationalTotal: internationalUsed + internationalAvailable,
+    };
   }
   return null;
 }
@@ -530,11 +583,11 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
   const creditCards: CreditCardBalance[] = [];
   if (await clickByTitle(page, "Tarjetas")) {
     await delay(3000);
-    const cardLabels = await page.evaluate(() => {
-      const selects = document.querySelectorAll("select.tdc");
-      if (selects.length === 0) return [];
-      return Array.from((selects[0] as HTMLSelectElement).options).map((o) => o.textContent?.trim() || "");
-    });
+    const cardLabels = await readCardLabels(page, debugLog);
+    debugLog.push(`  Cards found: ${cardLabels.length}`);
+    // Read now, while the cards home is still on screen: the menu steps below navigate away from it
+    const homeCupo = cardLabels.length > 0 ? await readCupoFromFrames(page) : null;
+    if (homeCupo) debugLog.push(`  Cupo (home): nacional ${homeCupo.nationalUsed}/${homeCupo.nationalTotal}`);
 
     if (cardLabels.length > 0 && await clickByTitle(page, "Mis movimientos")) {
       const tcFrame = await waitForFrame(page, IFRAME_PATTERNS.tcMovements, 15000);
@@ -567,6 +620,20 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
             creditCards.push(card);
           }
         }
+      }
+    }
+
+    if (creditCards.length === 0 && homeCupo) {
+      for (const label of cardLabels) {
+        const card: CreditCardBalance = {
+          label,
+          national: { used: homeCupo.nationalUsed, available: homeCupo.nationalAvailable, total: homeCupo.nationalTotal },
+          movements: [],
+        };
+        if (homeCupo.internationalTotal > 0) {
+          card.international = { used: homeCupo.internationalUsed, available: homeCupo.internationalAvailable, total: homeCupo.internationalTotal, currency: "USD" };
+        }
+        creditCards.push(card);
       }
     }
   }

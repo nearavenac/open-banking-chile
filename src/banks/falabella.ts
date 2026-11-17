@@ -3,7 +3,7 @@ import * as path from "path";
 import { chromium, type Browser, type Page } from "playwright-core";
 import type { BankMovement, BankScraper, CreditCardBalance, MovementSource, ScrapeResult, ScraperOptions } from "../types.js";
 import { MOVEMENT_SOURCE } from "../types.js";
-import { DebugLog, delay, deduplicateAcrossSources, deduplicateMovements, findChrome, monthYearLabel, normalizeDate, normalizeOwner, normalizeInstallments, parseChileanAmount } from "../utils.js";
+import { DebugLog, closeBrowserSafely, delay, deduplicateAcrossSources, deduplicateMovements, findChrome, monthYearLabel, normalizeDate, normalizeOwner, normalizeInstallments, parseChileanAmount } from "../utils.js";
 
 // ─── Constants ───────────────────────────────────────────────────
 
@@ -1064,7 +1064,7 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
     };
   } finally {
     clearTimeout(watchdog);
-    if (browser) await browser.close().catch(() => {});
+    if (browser) await closeBrowserSafely(browser);
   }
 }
 

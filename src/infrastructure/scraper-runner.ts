@@ -1,5 +1,5 @@
 import type { ScrapeResult, ScraperOptions } from "../types.js";
-import { logout } from "../utils.js";
+import { closeBrowserSafely, logout } from "../utils.js";
 import { launchBrowser, type BrowserOptions, type BrowserSession } from "./browser.js";
 
 export type ScrapeFn = (
@@ -72,7 +72,7 @@ export async function runScraper(
           if (pages.length > 0) await logout(pages[pages.length - 1], session.debugLog);
         } catch { /* best effort */ }
       }
-      await session.browser.close().catch(() => {});
+      await closeBrowserSafely(session.browser);
     }
   }
 }

@@ -40,6 +40,25 @@ export function delay(ms: number): Promise<void> {
 }
 
 /** Busca Chrome/Chromium en el sistema */
+/**
+ * Closes a browser without ever hanging on it: a wedged Chromium makes close() wait for ever. After `graceMs` the
+ * process (when the library exposes it) is killed and the caller moves on.
+ */
+export async function closeBrowserSafely(
+  browser: { close(): Promise<void>; process?: () => { kill(signal?: NodeJS.Signals | number): boolean } | null },
+  graceMs = 5_000,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const gaveUp = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), graceMs);
+  });
+  const outcome = await Promise.race([browser.close().then(() => "closed" as const, () => "closed" as const), gaveUp]);
+  clearTimeout(timer);
+  if (outcome === "timeout") {
+    try { browser.process?.()?.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+}
+
 export function findChrome(customPath?: string): string | null {
   if (customPath && fs.existsSync(customPath)) return customPath;
 

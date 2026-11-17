@@ -23,3 +23,19 @@ describe("runScraper timeoutMs", () => {
     expect(close).toHaveBeenCalled();
   });
 });
+
+describe("closeBrowserSafely", () => {
+  it("kills the process when close() hangs", async () => {
+    const { closeBrowserSafely } = await import("../utils.js");
+    const kill = vi.fn(() => true);
+    await closeBrowserSafely({ close: () => new Promise<void>(() => {}), process: () => ({ kill }) }, 20);
+    expect(kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it("does not kill a browser that closes in time", async () => {
+    const { closeBrowserSafely } = await import("../utils.js");
+    const kill = vi.fn(() => true);
+    await closeBrowserSafely({ close: async () => {}, process: () => ({ kill }) }, 50);
+    expect(kill).not.toHaveBeenCalled();
+  });
+});

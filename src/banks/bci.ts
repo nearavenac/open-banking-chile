@@ -578,6 +578,11 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
 
   const deduplicated = deduplicateMovements(allMovements);
   debugLog.push(`  Total: ${deduplicated.length} unique movements`);
+  // Nothing read and no balance either: the movements page never loaded. Report it instead of a "successful" empty sync.
+  if (deduplicated.length === 0 && balance === undefined && creditCards.length === 0) {
+    await doSave(page, "06-empty");
+    return { success: false, bank, error: "No se pudo leer la cartola de BCI (la página de movimientos no cargó). Reintenta la sincronización.", debug: debugLog.join("\n") };
+  }
   progress(`Listo — ${deduplicated.length} movimientos totales`);
   await doSave(page, "06-final");
   const ss = doScreenshots ? (await page.screenshot({ encoding: "base64" })) as string : undefined;

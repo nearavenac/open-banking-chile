@@ -205,7 +205,12 @@ async function skipTrustedDeviceRegistration(page: Page, debugLog: string[]): Pr
       omit?.click();
       return omit !== undefined;
     }).catch(() => false);
-    if (!skipped) return;
+    if (!skipped) {
+      // The notice can render a moment after login: look once more before giving up
+      if (attempt > 0) return;
+      await delay(2000);
+      continue;
+    }
     debugLog.push("  Registro de dispositivo de confianza omitido");
     await delay(3000);
   }

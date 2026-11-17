@@ -959,10 +959,17 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
   }
 
   let browser: Browser | undefined;
+  let watchdog: ReturnType<typeof setTimeout> | undefined;
 
   try {
     const session = await launchPlaywright(options);
     browser = session.browser;
+    // Closing the browser makes every pending Playwright call reject, so a stalled scrape ends with an error
+    // instead of being abandoned by the caller with Chromium still running.
+    if (options.timeoutMs) {
+      const hung = browser;
+      watchdog = setTimeout(() => void hung.close().catch(() => {}), options.timeoutMs);
+    }
     const { page, debugLog } = session;
 
     // Login
@@ -1047,6 +1054,7 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
       error: `Error del scraper: ${error instanceof Error ? error.message : String(error)}`,
     };
   } finally {
+    clearTimeout(watchdog);
     if (browser) await browser.close().catch(() => {});
   }
 }

@@ -34,6 +34,7 @@ export async function runScraper(
   }
 
   let session: BrowserSession | undefined;
+  let timedOut = false;
 
   try {
     session = await launchBrowser(
@@ -44,7 +45,10 @@ export async function runScraper(
     if (!timeoutMs) return await scrapeFn(session, options);
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`tiempo máximo excedido (${Math.round(timeoutMs / 1000)}s)`)), timeoutMs);
+      timer = setTimeout(() => {
+        timedOut = true;
+        reject(new Error(`tiempo máximo excedido (${Math.round(timeoutMs / 1000)}s)`));
+      }, timeoutMs);
     });
     try {
       return await Promise.race([scrapeFn(session, options), timeout]);
@@ -61,10 +65,13 @@ export async function runScraper(
     };
   } finally {
     if (session?.browser) {
-      try {
-        const pages = await session.browser.pages();
-        if (pages.length > 0) await logout(pages[pages.length - 1], session.debugLog);
-      } catch { /* best effort */ }
+      // A scrape that timed out is usually stuck on a hung page: logging out there would wait on it, just close
+      if (!timedOut) {
+        try {
+          const pages = await session.browser.pages();
+          if (pages.length > 0) await logout(pages[pages.length - 1], session.debugLog);
+        } catch { /* best effort */ }
+      }
       await session.browser.close().catch(() => {});
     }
   }

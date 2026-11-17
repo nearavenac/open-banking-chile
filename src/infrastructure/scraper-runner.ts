@@ -22,7 +22,7 @@ export async function runScraper(
   browserOptions: Partial<BrowserOptions>,
   scrapeFn: ScrapeFn,
 ): Promise<ScrapeResult> {
-  const { rut, password, chromePath, saveScreenshots, headful, onDebug } = options;
+  const { rut, password, chromePath, saveScreenshots, headful, onDebug, timeoutMs } = options;
 
   if (!rut || !password) {
     return {
@@ -41,7 +41,16 @@ export async function runScraper(
       !!saveScreenshots,
     );
 
-    return await scrapeFn(session, options);
+    if (!timeoutMs) return await scrapeFn(session, options);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`tiempo máximo excedido (${Math.round(timeoutMs / 1000)}s)`)), timeoutMs);
+    });
+    try {
+      return await Promise.race([scrapeFn(session, options), timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   } catch (error) {
     return {
       success: false,

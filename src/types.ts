@@ -128,6 +128,11 @@ export interface ScraperOptions extends BankCredentials {
   /** Si es true, usa headless: false (para debugging visual) */
   headful?: boolean;
   /**
+   * Tiempo máximo total (ms) del scrape lanzado por el runner. Al vencer se cierra el navegador y se devuelve un error,
+   * para que quien llama no deje un Chromium huérfano al abandonar la promesa por su cuenta.
+   */
+  timeoutMs?: number;
+  /**
    * URL CDP (ej: "http://127.0.0.1:9222") de un Chrome real lanzado a mano con --remote-debugging-port. En vez de
    * lanzar su propio navegador (que el anti-bot bloquea), el scraper se conecta a esa ventana y lee su sesión.
    * Si no hay sesión (o expiró) y se pasan rut/clave, inicia sesión dentro de ese mismo Chrome.

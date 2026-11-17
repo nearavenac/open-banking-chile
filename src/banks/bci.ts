@@ -31,14 +31,9 @@ interface BciApiMovement {
  */
 async function waitForCheckingMovements(interceptor: Interceptor, timeoutMs: number): Promise<unknown[]> {
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const all = interceptor.getAll("bci-checking");
-    if (all.some((c) => Array.isArray((c as { movimientos?: unknown }).movimientos))) {
-      await delay(500);
-      return interceptor.getAll("bci-checking");
-    }
-    await delay(500);
-  }
+  const hasMovements = () => interceptor.getAll("bci-checking").some((c) => Array.isArray((c as { movimientos?: unknown }).movimientos));
+  while (Date.now() < deadline && !hasMovements()) await delay(500);
+  if (hasMovements()) await delay(500);
   return interceptor.getAll("bci-checking");
 }
 
@@ -206,13 +201,9 @@ async function skipTrustedDeviceRegistration(page: Page, debugLog: string[]): Pr
   for (let attempt = 0; attempt < 3; attempt++) {
     const skipped = await page.evaluate(() => {
       if (!/dispositivo de confianza/i.test(document.body?.innerText ?? "")) return false;
-      for (const el of Array.from(document.querySelectorAll("button, a"))) {
-        if ((el as HTMLElement).innerText?.trim().toLowerCase() === "omitir") {
-          (el as HTMLElement).click();
-          return true;
-        }
-      }
-      return false;
+      const omit = Array.from(document.querySelectorAll<HTMLElement>("button, a")).find((el) => el.innerText?.trim().toLowerCase() === "omitir");
+      omit?.click();
+      return omit !== undefined;
     }).catch(() => false);
     if (!skipped) return;
     debugLog.push("  Registro de dispositivo de confianza omitido");
@@ -474,10 +465,6 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
       const captured = await waitForCheckingMovements(interceptor, 25_000);
       if (captured.length > 0) {
         debugLog.push(`  Checking API: ${captured.length} response(s) captured`);
-        for (const c of captured) {
-          const o = c as { movimientos?: unknown[] } & Record<string, unknown>;
-          debugLog.push(`    capture keys=${Object.keys(o ?? {}).join(",").slice(0, 120)} movimientos=${Array.isArray(o?.movimientos) ? o.movimientos.length : "n/a"}`);
-        }
         const apiMovements = normalizeBciApiMovements(captured);
         debugLog.push(`  Checking API movements: ${apiMovements.length}`);
         if (apiMovements.length > 0) {

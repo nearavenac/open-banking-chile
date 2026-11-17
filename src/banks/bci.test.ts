@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { MOVEMENT_SOURCE } from "../types.js";
-import { normalizeBciApiMovements } from "./bci.js";
+import { normalizeBciApiMovements, parseBciCupo } from "./bci.js";
 
 describe("normalizeBciApiMovements", () => {
   it("returns empty array for empty captures", () => {
@@ -88,5 +88,36 @@ describe("normalizeBciApiMovements", () => {
     const result = normalizeBciApiMovements([makeCapture("A"), makeCapture("B")]);
     expect(result).toHaveLength(2);
     expect(result.map((m) => m.description)).toEqual(["A", "B"]);
+  });
+});
+
+describe("parseBciCupo", () => {
+  const HOME = `Tarjetas de Crédito
+BciPlus+ Visa Platinum - 9567
+Monto Nacional Disponible
+$ 1.200.000
+Monto Nacional Utilizado
+$ 0
+Monto Internacional Disponible
+US$ 667
+Monto Internacional Utilizado
+US$ 0`;
+
+  it("reads the cupo of the cards home (Chilean thousands, label and value on separate lines)", () => {
+    expect(parseBciCupo(HOME)).toEqual({
+      nationalUsed: 0, nationalAvailable: 1_200_000, nationalTotal: 1_200_000,
+      internationalUsed: 0, internationalAvailable: 667, internationalTotal: 667,
+    });
+  });
+
+  it("drops decimals and keeps the used amount", () => {
+    const cupo = parseBciCupo("Monto Nacional Disponible $ 800.000\nMonto Nacional Utilizado $ 400.000\nMonto Internacional Utilizado US$ 1.234,56");
+    expect(cupo?.nationalTotal).toBe(1_200_000);
+    expect(cupo?.internationalUsed).toBe(1234);
+  });
+
+  it("returns null instead of a zero cupo when the layout does not match", () => {
+    expect(parseBciCupo("Monto Nacional\nDisponible 1.200.000")).toBeNull();
+    expect(parseBciCupo("")).toBeNull();
   });
 });

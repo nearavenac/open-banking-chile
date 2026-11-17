@@ -84,15 +84,23 @@ const ACCOUNT_SELECT = "bci-wk-select#cuenta select, select";
 
 // ─── BCI-specific helpers ────────────────────────────────────────
 
+/** Resolves to `fallback` if the promise has not settled in `ms`: a frame stuck mid-navigation can leave evaluate() pending. */
+function orFallback<T>(promise: Promise<T>, fallback: T, ms = 3_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => { timer = setTimeout(() => resolve(fallback), ms); });
+  return Promise.race([promise.catch(() => fallback), timeout]).finally(() => clearTimeout(timer));
+}
+
 /** Clicks the menu link with that title, waiting for it to render: right after login the menu is still loading. */
 async function clickByTitle(page: Page, title: string, timeoutMs = 15_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   do {
-    const clicked = await page.evaluate((t: string) => {
+    // evaluate rejects while the page navigates (context destroyed): try again
+    const clicked = await orFallback(page.evaluate((t: string) => {
       const link = document.querySelector(`a[title="${t}"]`) as HTMLElement | null;
       if (link) { link.click(); return true; }
       return false;
-    }, title).catch(() => false); // the context is destroyed while the page navigates: try again
+    }, title), false);
     if (clicked) return true;
     await delay(500);
   } while (Date.now() < deadline);
@@ -109,23 +117,36 @@ async function waitForFrame(page: Page, urlPattern: string, timeoutMs = 10000): 
   return null;
 }
 
+function liveFrames(page: Page): Frame[] {
+  return page.frames().filter((f) => !f.isDetached() && f.url() !== "about:blank");
+}
+
+type SelectInfo = { cls: string; options: string[] };
+
 /**
  * The card selector ("BciPlus+ Visa Platinum - 9567") sits inside one of the page's frames, not always the top
- * document: look in every frame, preferring `select.tdc`, else any select whose options end in a 4-digit card number.
+ * document. `select.tdc` in ANY frame wins; only then any select whose options all end in a 4-digit card number.
+ * The cards home may render after the click, so it is polled for a few seconds.
  */
-async function readCardLabels(page: Page, debugLog: string[]): Promise<string[]> {
-  for (const frame of page.frames()) {
-    const selects = await frame.evaluate(() =>
-      Array.from(document.querySelectorAll("select")).map((el) => ({
-        cls: el.className,
-        options: Array.from(el.options).map((o) => o.textContent?.trim() || ""),
-      })),
-    ).catch(() => [] as { cls: string; options: string[] }[]);
-    if (selects.length === 0) continue;
-    debugLog.push(`  Frame ${frame.url().split("?")[0].slice(-50)}: ${selects.map((x) => `select.${x.cls || "?"}[${x.options.length}]`).join(" ")}`);
-    const match = selects.find((x) => /(^|\s)tdc(\s|$)/.test(x.cls)) ?? selects.find((x) => x.options.length > 0 && x.options.every((o) => /\d{4}\s*$/.test(o)));
+async function readCardLabels(page: Page, debugLog: string[], timeoutMs = 10_000): Promise<string[]> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const found: SelectInfo[] = [];
+    for (const frame of liveFrames(page)) {
+      const selects = await orFallback(frame.evaluate(() =>
+        Array.from(document.querySelectorAll("select")).map((el) => ({
+          cls: el.className,
+          options: Array.from(el.options).map((o) => o.textContent?.trim() || ""),
+        })),
+      ), [] as SelectInfo[]);
+      if (selects.length > 0) debugLog.push(`  Frame ${frame.url().split("?")[0].slice(-50)}: ${selects.map((x) => `select.${x.cls || "?"}[${x.options.length}]`).join(" ")}`);
+      found.push(...selects);
+    }
+    const match = found.find((x) => /(^|\s)tdc(\s|$)/.test(x.cls))
+      ?? found.find((x) => x.options.length > 0 && x.options.every((o) => /\d{4}\s*$/.test(o)));
     if (match) return match.options.filter(Boolean);
-  }
+    await delay(1000);
+  } while (Date.now() < deadline);
   return [];
 }
 
@@ -134,25 +155,47 @@ interface BciCupo {
   internationalUsed: number; internationalAvailable: number; internationalTotal: number;
 }
 
-/** The cards home already shows "Monto Nacional/Internacional Disponible/Utilizado": read it from whichever frame has it. */
+/**
+ * Parses the cards home text ("Monto Nacional Disponible $ 1.200.000", "Monto Internacional Utilizado US$ 0", ...).
+ * Chilean format: "." thousands, "," decimals (dropped). Null when no national amount was read, so a layout change
+ * never turns into a plausible-looking zero cupo.
+ */
+export function parseBciCupo(text: string): BciCupo | null {
+  const amount = (re: RegExp): number => {
+    const m = text.match(re);
+    return m ? parseInt(m[1].split(",")[0].replace(/\D/g, ""), 10) || 0 : 0;
+  };
+  const nationalAvailable = amount(/monto nacional disponible\s*\$\s*([\d.,]+)/i);
+  const nationalUsed = amount(/monto nacional utilizado\s*\$\s*([\d.,]+)/i);
+  if (nationalAvailable + nationalUsed === 0) return null;
+  const internationalAvailable = amount(/monto internacional disponible\s*US\$\s*([\d.,]+)/i);
+  const internationalUsed = amount(/monto internacional utilizado\s*US\$\s*([\d.,]+)/i);
+  return {
+    nationalUsed, nationalAvailable, nationalTotal: nationalUsed + nationalAvailable,
+    internationalUsed, internationalAvailable, internationalTotal: internationalUsed + internationalAvailable,
+  };
+}
+
+/** The cards home already shows the cupo of the selected card: read it from whichever frame has it. */
 async function readCupoFromFrames(page: Page): Promise<BciCupo | null> {
-  for (const frame of page.frames()) {
-    const text = await frame.evaluate(() => document.body?.innerText ?? "").catch(() => "");
-    if (!/monto nacional/i.test(text)) continue;
-    const amount = (re: RegExp): number => {
-      const m = text.match(re);
-      return m ? parseInt(m[1].split(",")[0].replace(/\D/g, ""), 10) || 0 : 0;
-    };
-    const nationalAvailable = amount(/monto nacional disponible\s*\$\s*([\d.,]+)/i);
-    const nationalUsed = amount(/monto nacional utilizado\s*\$\s*([\d.,]+)/i);
-    const internationalAvailable = amount(/monto internacional disponible\s*US\$\s*([\d.,]+)/i);
-    const internationalUsed = amount(/monto internacional utilizado\s*US\$\s*([\d.,]+)/i);
-    return {
-      nationalUsed, nationalAvailable, nationalTotal: nationalUsed + nationalAvailable,
-      internationalUsed, internationalAvailable, internationalTotal: internationalUsed + internationalAvailable,
-    };
+  for (const frame of liveFrames(page)) {
+    const text = await orFallback(frame.evaluate(() => document.body?.innerText ?? ""), "");
+    const cupo = parseBciCupo(text);
+    if (cupo) return cupo;
   }
   return null;
+}
+
+function cardWithCupo(label: string, cupo: BciCupo): CreditCardBalance {
+  const card: CreditCardBalance = {
+    label,
+    national: { used: cupo.nationalUsed, available: cupo.nationalAvailable, total: cupo.nationalTotal },
+    movements: [],
+  };
+  if (cupo.internationalTotal > 0) {
+    card.international = { used: cupo.internationalUsed, available: cupo.internationalAvailable, total: cupo.internationalTotal, currency: "USD" };
+  }
+  return card;
 }
 
 async function bciLogin(
@@ -581,15 +624,20 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
   progress("Extrayendo datos de tarjeta de crédito...");
   debugLog.push("6. Navigating to credit cards...");
   const creditCards: CreditCardBalance[] = [];
-  if (await clickByTitle(page, "Tarjetas")) {
+  if (await clickByTitle(page, "Tarjetas", 5_000)) {
     await delay(3000);
     const cardLabels = await readCardLabels(page, debugLog);
     debugLog.push(`  Cards found: ${cardLabels.length}`);
-    // Read now, while the cards home is still on screen: the menu steps below navigate away from it
+    // Read now, while the cards home is still on screen: the menu steps below navigate away from it.
+    // It shows the cupo of the selected (first) card only, so only that card gets it.
     const homeCupo = cardLabels.length > 0 ? await readCupoFromFrames(page) : null;
-    if (homeCupo) debugLog.push(`  Cupo (home): nacional ${homeCupo.nationalUsed}/${homeCupo.nationalTotal}`);
+    if (homeCupo) {
+      debugLog.push(`  Cupo (home): nacional ${homeCupo.nationalUsed}/${homeCupo.nationalTotal}`);
+      creditCards.push(cardWithCupo(cardLabels[0], homeCupo));
+      if (cardLabels.length > 1) debugLog.push(`  ${cardLabels.length - 1} more card(s) skipped: their cupo is not on screen`);
+    }
 
-    if (cardLabels.length > 0 && await clickByTitle(page, "Mis movimientos")) {
+    if (cardLabels.length > 0 && await clickByTitle(page, "Mis movimientos", 5_000)) {
       const tcFrame = await waitForFrame(page, IFRAME_PATTERNS.tcMovements, 15000);
       if (tcFrame) {
         await delay(3000);
@@ -599,7 +647,8 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
         }
       }
 
-      if (await clickByTitle(page, "Cupo disponible")) {
+      // Menu route to the cupo, only when the home did not show it
+      if (!homeCupo && await clickByTitle(page, "Cupo disponible", 5_000)) {
         const cupoFrame = await waitForFrame(page, IFRAME_PATTERNS.tcCupo, 15000);
         if (cupoFrame) {
           await delay(3000);
@@ -614,26 +663,8 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
             const intTotal = bodyText.match(/total\s*(?:internacional)?\s*USD?\s*\$?\s*([\d.,]+)/i);
             return { nationalUsed: natUsed ? parseAmt(natUsed[1]) : 0, nationalAvailable: natAvail ? parseAmt(natAvail[1]) : 0, nationalTotal: natTotal ? parseAmt(natTotal[1]) : 0, internationalUsed: intUsed ? parseAmt(intUsed[1]) : 0, internationalAvailable: intAvail ? parseAmt(intAvail[1]) : 0, internationalTotal: intTotal ? parseAmt(intTotal[1]) : 0 };
           });
-          for (const label of cardLabels) {
-            const card: CreditCardBalance = { label, national: { used: cupoData.nationalUsed, available: cupoData.nationalAvailable, total: cupoData.nationalTotal }, movements: [] };
-            if (cupoData.internationalTotal > 0) card.international = { used: cupoData.internationalUsed, available: cupoData.internationalAvailable, total: cupoData.internationalTotal, currency: "USD" };
-            creditCards.push(card);
-          }
+          for (const label of cardLabels) creditCards.push(cardWithCupo(label, cupoData));
         }
-      }
-    }
-
-    if (creditCards.length === 0 && homeCupo) {
-      for (const label of cardLabels) {
-        const card: CreditCardBalance = {
-          label,
-          national: { used: homeCupo.nationalUsed, available: homeCupo.nationalAvailable, total: homeCupo.nationalTotal },
-          movements: [],
-        };
-        if (homeCupo.internationalTotal > 0) {
-          card.international = { used: homeCupo.internationalUsed, available: homeCupo.internationalAvailable, total: homeCupo.internationalTotal, currency: "USD" };
-        }
-        creditCards.push(card);
       }
     }
   }

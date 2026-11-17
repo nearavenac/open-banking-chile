@@ -142,7 +142,7 @@ async function readCardLabels(page: Page, debugLog: string[], timeoutMs = 10_000
       if (selects.length > 0) debugLog.push(`  Frame ${frame.url().split("?")[0].slice(-50)}: ${selects.map((x) => `select.${x.cls || "?"}[${x.options.length}]`).join(" ")}`);
       found.push(...selects);
     }
-    const match = found.find((x) => /(^|\s)tdc(\s|$)/.test(x.cls))
+    const match = found.find((x) => /(^|\s)tdc(\s|$)/.test(x.cls) && x.options.some(Boolean))
       ?? found.find((x) => x.options.length > 0 && x.options.every((o) => /\d{4}\s*$/.test(o)));
     if (match) return match.options.filter(Boolean);
     await delay(1000);
@@ -663,7 +663,12 @@ async function scrapeBci(session: BrowserSession, options: ScraperOptions): Prom
             const intTotal = bodyText.match(/total\s*(?:internacional)?\s*USD?\s*\$?\s*([\d.,]+)/i);
             return { nationalUsed: natUsed ? parseAmt(natUsed[1]) : 0, nationalAvailable: natAvail ? parseAmt(natAvail[1]) : 0, nationalTotal: natTotal ? parseAmt(natTotal[1]) : 0, internationalUsed: intUsed ? parseAmt(intUsed[1]) : 0, internationalAvailable: intAvail ? parseAmt(intAvail[1]) : 0, internationalTotal: intTotal ? parseAmt(intTotal[1]) : 0 };
           });
-          for (const label of cardLabels) creditCards.push(cardWithCupo(label, cupoData));
+          // No amount read at all (layout change, page still loading): no cupo beats a plausible-looking zero one
+          if (cupoData.nationalTotal + cupoData.nationalUsed + cupoData.nationalAvailable > 0) {
+            for (const label of cardLabels) creditCards.push(cardWithCupo(label, cupoData));
+          } else {
+            debugLog.push("  Cupo (menu): no amounts read, cards skipped");
+          }
         }
       }
     }

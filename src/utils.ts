@@ -179,6 +179,10 @@ export function normalizeDate(raw: string): string {
     return `${day}-${month}-${year}`;
   }
 
+  // ISO yyyy-mm-dd, con o sin hora (ej: la API de BCI entrega "2026-11-12T00:00:00")
+  const isoMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?$/);
+  if (isoMatch) return `${isoMatch[3]}-${isoMatch[2]}-${isoMatch[1]}`;
+
   // dd/mm (sin año, asume año actual)
   const shortMatch = value.match(/^(\d{1,2})[\/.\-](\d{1,2})$/);
   if (shortMatch) {

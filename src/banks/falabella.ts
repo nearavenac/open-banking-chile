@@ -3,12 +3,13 @@ import * as path from "path";
 import { chromium, type Browser, type Page } from "playwright-core";
 import type { BankMovement, BankScraper, CreditCardBalance, MovementSource, ScrapeResult, ScraperOptions } from "../types.js";
 import { MOVEMENT_SOURCE } from "../types.js";
+import { PENDING_DATE, collectCmrPages, type CmrPageSnapshot } from "./falabella-pages.js";
 import { DebugLog, closeBrowserSafely, delay, deduplicateAcrossSources, deduplicateMovements, findChrome, monthYearLabel, normalizeDate, normalizeOwner, normalizeInstallments, parseChileanAmount } from "../utils.js";
 
 // ─── Constants ───────────────────────────────────────────────────
 
 const BANK_URL = "https://www.bancofalabella.cl";
-const MAX_PAGES = 20;
+const MAX_PAGES = 60;
 // Returns as soon as the card's table renders; the long ceiling is for slow connections (metered proxy).
 const CMR_WAIT_MS = 90_000;
 const EMPTY_CARD_MOVEMENTS_ERROR =
@@ -436,7 +437,6 @@ async function scrapeCreditCard(page: Page, debugLog: string[], doScreenshots: b
   const allMovements: BankMovement[] = [];
 
   debugLog.push("9. [CMR] Looking for CMR card...");
-  progress("Navegando a tarjeta de crédito...");
 
   // Extract cupos from dashboard
   const cupoData = await extractCupos(page, debugLog);
@@ -544,7 +544,7 @@ async function waitForCmrContent(page: Page, timeoutMs: number): Promise<void> {
     await page.waitForFunction((host: string) => {
       const el = document.querySelector(host) as Element & { shadowRoot?: ShadowRoot };
       // Some variants of the card page render the table in the regular DOM, with no shadow host
-      if (!el?.shadowRoot) return document.querySelectorAll("table tbody tr td").length > 0;
+      if (!el?.shadowRoot) return document.querySelectorAll("table tbody tr td, button.btn-retry").length > 0;
       function collectAll(root: ShadowRoot | Element): Array<ShadowRoot | Element> {
         const found: Array<ShadowRoot | Element> = [root];
         for (const child of Array.from((root as Element).querySelectorAll("*"))) {
@@ -554,7 +554,8 @@ async function waitForCmrContent(page: Page, timeoutMs: number): Promise<void> {
         return found;
       }
       return collectAll(el.shadowRoot).some(
-        r => (r as Element).querySelectorAll("table tbody tr td").length > 0,
+        // The bank's «No pudimos cargar» panel (button.btn-retry) is also a settled state: the caller retries it
+        r => (r as Element).querySelectorAll("table tbody tr td, button.btn-retry").length > 0,
       );
     }, "credit-card-movements", { timeout: timeoutMs });
   } catch { /* timeout */ }
@@ -738,213 +739,130 @@ async function clickCmrTab(page: Page, debugLog: string[]): Promise<boolean> {
   return result !== null;
 }
 
-async function paginateCmrMovements(page: Page, source: MovementSource, debugLog: string[]): Promise<BankMovement[]> {
-  const all: BankMovement[] = [];
-  const host = "credit-card-movements";
+type CmrPageAction = "read" | "next" | "retry";
 
-  for (let i = 0; i < MAX_PAGES; i++) {
-    // Extract + click next in a single evaluate
-    const result: { rows: BankMovement[]; firstRow: string; clicked: boolean } = await page.evaluate(
-      ({ host: h, src, isBilled }: { host: string; src: string; isBilled: boolean }) => {
-        const shadowEl = document.querySelector(h) as Element & { shadowRoot?: ShadowRoot };
-        const topRoot = shadowEl?.shadowRoot || document;
-
-        function collectAll(root: ShadowRoot | Element | Document): Array<ShadowRoot | Element | Document> {
-          const found: Array<ShadowRoot | Element | Document> = [root];
-          for (const el of Array.from((root as ParentNode).querySelectorAll("*"))) {
-            const sr = (el as Element & { shadowRoot?: ShadowRoot }).shadowRoot;
-            if (sr) found.push(...collectAll(sr));
-          }
-          return found;
+/**
+ * Reads the tab's current page and optionally clicks "next" or the bank's "Reintentar" button.
+ * Only the tab's own container is read (`app-last-movements` / `app-invoiced-movements`), so rows of the other
+ * tab or of another panel can never be reported under this source.
+ */
+async function cmrPage(page: Page, source: MovementSource, action: CmrPageAction): Promise<CmrPageSnapshot<BankMovement> & { acted: boolean }> {
+  return page.evaluate(
+    ({ host, src, isBilled, act, pendingDate }: { host: string; src: string; isBilled: boolean; act: string; pendingDate: string }) => {
+      const shadowEl = document.querySelector(host) as Element & { shadowRoot?: ShadowRoot };
+      const topRoot = shadowEl?.shadowRoot || document;
+      function collectAll(root: ShadowRoot | Element | Document): Array<ShadowRoot | Element | Document> {
+        const found: Array<ShadowRoot | Element | Document> = [root];
+        for (const el of Array.from((root as ParentNode).querySelectorAll("*"))) {
+          const sr = (el as Element & { shadowRoot?: ShadowRoot }).shadowRoot;
+          if (sr) found.push(...collectAll(sr));
         }
-        const roots = collectAll(topRoot);
+        return found;
+      }
+      const roots = collectAll(topRoot);
+      const visible = (el: Element) => { const r = el.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+      const all = <T extends Element>(selector: string): T[] =>
+        roots.flatMap(r => Array.from((r as ParentNode).querySelectorAll<T>(selector)));
 
-        // Extract movements from visible tables
-        const allTables: HTMLTableElement[] = roots.flatMap(
-          r => Array.from((r as Element).querySelectorAll<HTMLTableElement>("table")),
-        );
-        function isVisible(t: HTMLTableElement): boolean {
-          const r = t.getBoundingClientRect();
-          return r.width > 0 || r.height > 0;
-        }
+      const containerTag = isBilled ? "app-invoiced-movements" : "app-last-movements";
+      const containers = all<HTMLElement>(containerTag).filter(visible);
+      // Older variants of the page have no per-tab container: fall back to every visible table
+      const within = <T extends Element>(selector: string): T[] =>
+        (containers.length > 0 ? containers.flatMap(c => Array.from(c.querySelectorAll<T>(selector))) : all<T>(selector)).filter(visible);
 
-        const rows: BankMovement[] = [];
-        const tablesToUse = isBilled
-          ? allTables.filter(t => {
-              if (!isVisible(t)) return false;
-              const hdr = (t.querySelector("thead, tr:first-child") as HTMLElement | null)?.innerText?.toLowerCase() ?? "";
-              return hdr.includes("fecha de compra") || hdr.includes("monto total") || hdr.includes("cuota a pagar");
-            })
-          : allTables.filter(t => isVisible(t));
+      const retryButton = within<HTMLButtonElement>("button.btn-retry")[0]
+        ?? within<HTMLButtonElement>("button").find(b => /^reintentar$/i.test(b.innerText?.trim() ?? ""));
+      const nextButton = within<HTMLButtonElement>("button.btn-pagination, button").find(b => {
+        const img = b.querySelector("img");
+        if (!img || img.classList.contains("btn-back")) return false;
+        const hint = `${img.getAttribute("alt") ?? ""} ${img.getAttribute("src") ?? ""}`.toLowerCase();
+        return hint.includes("avanzar") || hint.includes("siguiente") || hint.includes("right-arrow") || hint.includes("arrow-right");
+      });
 
-        const finalTables = tablesToUse.length > 0
-          ? tablesToUse
-          : allTables.filter(t => isVisible(t) && !t.closest("app-last-movements"));
+      const rows: BankMovement[] = [];
+      const signature: string[] = [];
+      for (const row of within<HTMLTableRowElement>("table tbody tr")) {
+        const cells = row.querySelectorAll("td");
+        if (cells.length < 4) continue;
+        const texts = Array.from(cells).map(c => (c as HTMLElement).innerText?.trim() || "");
+        signature.push(texts.join("|"));
+        const dateMatch = texts[0]?.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/);
+        const pendingImg = row.querySelector("td:first-child img[alt*='pendiente'], td:first-child .td-time-img");
+        if (!dateMatch && !pendingImg && texts[0] !== "") continue;
+        // A closed statement only has posted charges: a row with no date there is not a statement line
+        if (!dateMatch && isBilled) continue;
+        const date = dateMatch ? dateMatch[1].replace(/\//g, "-") : pendingDate;
+        const description = texts[1] || "";
+        const totalText = texts[3] || "";
+        const montoText = texts[5] || totalText;
+        const amountMatch = montoText.match(/\$\s*([\d.,]+)/);
+        if (!description || !amountMatch) continue;
+        const value = parseInt(amountMatch[1].replace(/\./g, "").replace(",", "."), 10) || 0;
+        if (value === 0) continue;
+        const totalAmountMatch = totalText.match(/\$\s*([\d.,]+)/);
+        rows.push({
+          date, description, amount: montoText.includes("-$") ? value : -value, balance: 0,
+          source: src as MovementSource,
+          owner: (texts[2] || undefined) as BankMovement["owner"],
+          installments: texts[4] || undefined,
+          totalAmount: totalAmountMatch ? parseInt(totalAmountMatch[1].replace(/\./g, "").replace(",", "."), 10) || undefined : undefined,
+        });
+      }
 
-        for (const table of finalTables) {
-          for (const row of Array.from(table.querySelectorAll("tbody tr"))) {
-            const cells = row.querySelectorAll("td");
-            if (cells.length < 4) continue;
-            const texts = Array.from(cells).map(c => (c as HTMLElement).innerText?.trim() || "");
-            const dateMatch = texts[0]?.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/);
-            const pendingImg = row.querySelector("td:first-child img[alt*='pendiente'], td:first-child .td-time-img");
-            if (!dateMatch && !pendingImg && texts[0] !== "") continue;
-            const date = dateMatch ? dateMatch[1].replace(/\//g, "-") : "pendiente";
-            const description = texts[1] || "";
-            const totalText = texts[3] || "";
-            const cuotaText = texts[5] || "";
-            const montoText = cuotaText || totalText;
-            const isNeg = montoText.includes("-$");
-            const amountMatch = montoText.match(/\$\s*([\d.,]+)/);
-            let amount = 0;
-            if (amountMatch) {
-              const value = parseInt(amountMatch[1].replace(/\./g, "").replace(",", "."), 10) || 0;
-              amount = isNeg ? value : -value;
-            }
-            const totalAmountMatch = totalText.match(/\$\s*([\d.,]+)/);
-            const totalAmount = totalAmountMatch
-              ? parseInt(totalAmountMatch[1].replace(/\./g, "").replace(",", "."), 10) || undefined
-              : undefined;
-            if (description && amount !== 0) {
-              rows.push({
-                date, description, amount, balance: 0,
-                source: src as MovementSource,
-                owner: (texts[2] || undefined) as any,
-                installments: texts[4] || undefined,
-                totalAmount,
-              });
-            }
-          }
-        }
+      const hasNext = !!nextButton && !nextButton.disabled;
+      let acted = false;
+      if (act === "next" && hasNext) { nextButton.click(); acted = true; }
+      if (act === "retry" && retryButton) { retryButton.click(); acted = true; }
 
-        // First row signature for change detection.
-        // For billed movements, prefer the "fecha de compra" table — "pendientes de
-        // confirmación" rows don't change across pages and cause false negatives.
-        let firstRow = "";
-        if (isBilled) {
-          outer: for (const r of roots) {
-            for (const tbl of Array.from((r as Element).querySelectorAll<HTMLTableElement>("table"))) {
-              const hdr = (tbl.querySelector("thead, tr:first-child") as HTMLElement | null)?.innerText?.toLowerCase() ?? "";
-              if (!hdr.includes("fecha de compra")) continue;
-              const cells = tbl.querySelectorAll("tbody tr:first-child td");
-              if (cells.length > 0) {
-                firstRow = Array.from(cells).map(c => (c as HTMLElement).innerText?.trim()).join("|");
-                break outer;
-              }
-            }
-          }
-        }
-        if (!firstRow) {
-          for (const r of roots) {
-            const cells = (r as Element).querySelectorAll("table tbody tr:first-child td");
-            if (cells.length > 0) {
-              firstRow = Array.from(cells).map(c => (c as HTMLElement).innerText?.trim()).join("|");
-              break;
-            }
-          }
-        }
-
-        // Click next button
-        let clicked = false;
-        for (const root of roots) {
-          if (clicked) break;
-          for (const btn of Array.from((root as Element).querySelectorAll<HTMLButtonElement>(".btn-pagination, button"))) {
-            if (btn.disabled) continue;
-            const img = btn.querySelector("img");
-            const imgAlt = (img?.getAttribute("alt") || "").toLowerCase();
-            const imgSrc = img?.getAttribute("src") || "";
-            const label = (btn.getAttribute("aria-label") || btn.innerText || "").toLowerCase();
-            const isNext =
-              imgAlt.includes("avanzar") || imgAlt.includes("siguiente") || imgAlt.includes("next") ||
-              imgSrc.includes("right-arrow") || imgSrc.includes("arrow-right") || imgSrc.includes("next") ||
-              label.includes("siguiente") || label.includes("next") || label.includes("avanzar");
-            if (isNext) { btn.click(); clicked = true; break; }
-          }
-        }
-
-        return { rows, firstRow, clicked };
-      },
-      { host, src: source, isBilled: source === MOVEMENT_SOURCE.credit_card_billed },
-    );
-
-    debugLog.push(`  [CMR pag] page ${i + 1}: ${result.rows.length} rows`);
-    if (i === 0 && result.rows.length === 0) {
-      const diag = await page.evaluate(() => {
-        const host = document.querySelector("credit-card-movements") as (Element & { shadowRoot?: ShadowRoot }) | null;
-        const tables = Array.from(document.querySelectorAll("table"));
-        const shadowTables = host?.shadowRoot ? Array.from(host.shadowRoot.querySelectorAll("table")) : [];
-        const visible = (t: Element) => { const r = t.getBoundingClientRect(); return r.width > 0 || r.height > 0; };
-        const sample = (shadowTables[0] ?? tables[0])?.querySelector("tbody tr");
-        return {
-          url: location.pathname,
-          host: !!host, shadowRoot: !!host?.shadowRoot,
-          lightTables: tables.length, shadowTables: shadowTables.length,
-          visibleTables: [...tables, ...shadowTables].filter(visible).length,
-          sampleCells: sample ? Array.from(sample.querySelectorAll("td")).map(c => (c as HTMLElement).innerText.trim().slice(0, 25)) : null,
-        };
-      }).catch(() => null);
-      debugLog.push(`  [CMR diag] ${JSON.stringify(diag)}`);
-    }
-    all.push(...result.rows);
-
-    if (!result.clicked) break;
-
-    // Wait for content to change — use the same "fecha de compra" preference as above
-    const prevRow = result.firstRow;
-    const isBilled = source === MOVEMENT_SOURCE.credit_card_billed;
-    const changed = await page.waitForFunction(
-      ({ host: h, prev, billed }: { host: string; prev: string; billed: boolean }) => {
-        const el = document.querySelector(h) as Element & { shadowRoot?: ShadowRoot };
-        const topRoot = el?.shadowRoot || document;
-        function collectAll(root: ShadowRoot | Element | Document): Array<ShadowRoot | Element | Document> {
-          const found: Array<ShadowRoot | Element | Document> = [root];
-          for (const child of Array.from((root as ParentNode).querySelectorAll("*"))) {
-            const sr = (child as Element & { shadowRoot?: ShadowRoot }).shadowRoot;
-            if (sr) found.push(...collectAll(sr));
-          }
-          return found;
-        }
-        const roots = collectAll(topRoot);
-        // Prefer "fecha de compra" table for billed to avoid false negatives
-        if (billed) {
-          for (const r of roots) {
-            for (const tbl of Array.from((r as Element).querySelectorAll<HTMLTableElement>("table"))) {
-              const hdr = (tbl.querySelector("thead, tr:first-child") as HTMLElement | null)?.innerText?.toLowerCase() ?? "";
-              if (!hdr.includes("fecha de compra")) continue;
-              const cells = tbl.querySelectorAll("tbody tr:first-child td");
-              if (cells.length > 0) {
-                const sig = Array.from(cells).map(c => (c as HTMLElement).innerText?.trim()).join("|");
-                return sig !== prev && sig !== "";
-              }
-            }
-          }
-        }
-        // Fallback: any table's first row
-        for (const root of roots) {
-          const cells = (root as Element).querySelectorAll("table tbody tr:first-child td");
-          if (cells.length > 0) {
-            const sig = Array.from(cells).map(c => (c as HTMLElement).innerText?.trim()).join("|");
-            return sig !== prev && sig !== "";
-          }
-        }
-        return false;
-      },
-      { host, prev: prevRow, billed: isBilled },
-      { timeout: 15000 },
-    ).then(() => true, () => false);
-
-    if (!changed) break;
-    await delay(300);
-  }
-
-  return deduplicateMovements(
-    all.map(m => ({
-      ...m,
-      date: normalizeDate(m.date),
-      owner: normalizeOwner(m.owner),
-      installments: normalizeInstallments(m.installments),
-    })),
+      const state: "rows" | "error" | "empty" = retryButton ? "error" : signature.length > 0 ? "rows" : "empty";
+      return { state, rows, signature: signature.join("\n"), hasNext, acted };
+    },
+    { host: "credit-card-movements", src: source, isBilled: source === MOVEMENT_SOURCE.credit_card_billed, act: action, pendingDate: PENDING_DATE },
   );
+}
+
+/** Polls until the tab shows something other than `previous` (new rows, or the bank's error panel). */
+async function waitForCmrPageChange(page: Page, source: MovementSource, previous: string, timeoutMs: number): Promise<CmrPageSnapshot<BankMovement>> {
+  const deadline = Date.now() + timeoutMs;
+  let snapshot = await cmrPage(page, source, "read");
+  while (Date.now() < deadline) {
+    if (snapshot.state === "error") return snapshot;
+    if (snapshot.state === "rows" && snapshot.signature !== previous) return snapshot;
+    await delay(400);
+    snapshot = await cmrPage(page, source, "read");
+  }
+  return snapshot;
+}
+
+const CMR_PAGE_TIMEOUT_MS = 30_000;
+const CMR_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 20_000];
+
+/** Reads every page of a CMR tab; throws when the tab cannot be read to its last page (see `collectCmrPages`). */
+async function paginateCmrMovements(page: Page, source: MovementSource, debugLog: string[]): Promise<BankMovement[]> {
+  const rows = await collectCmrPages<BankMovement>(
+    {
+      read: () => cmrPage(page, source, "read"),
+      next: async () => (await cmrPage(page, source, "next")).acted,
+      retry: async () => {
+        await cmrPage(page, source, "retry");
+        await delay(1_000);
+      },
+      waitForChange: (previous) => waitForCmrPageChange(page, source, previous, CMR_PAGE_TIMEOUT_MS),
+    },
+    {
+      tab: source === MOVEMENT_SOURCE.credit_card_billed ? "facturados" : "por facturar",
+      maxPages: MAX_PAGES,
+      retryDelaysMs: CMR_RETRY_DELAYS_MS,
+      sleep: delay,
+      log: (line) => debugLog.push(line),
+    },
+  );
+  return rows.map(m => ({
+    ...m,
+    date: normalizeDate(m.date),
+    owner: normalizeOwner(m.owner),
+    installments: normalizeInstallments(m.installments),
+  }));
 }
 
 // ─── Main scrape function ────────────────────────────────────────
@@ -961,6 +879,7 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
   let browser: Browser | undefined;
   let watchdog: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
+  let debugLines: string[] = [];
   const timeoutError = () => `Error del scraper: tiempo máximo excedido (${Math.round((options.timeoutMs ?? 0) / 1000)}s)`;
 
   try {
@@ -976,6 +895,7 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
       }, options.timeoutMs);
     }
     const { page, debugLog } = session;
+    debugLines = debugLog;
 
     // Login
     const loginResult = await login(page, rut, password, debugLog, doScreenshots, progress);
@@ -1061,6 +981,7 @@ async function scrapeFalabella(options: ScraperOptions): Promise<ScrapeResult> {
       bank,
       accounts: [],
       error: timedOut ? timeoutError() : `Error del scraper: ${error instanceof Error ? error.message : String(error)}`,
+      debug: debugLines.join("\n"),
     };
   } finally {
     clearTimeout(watchdog);
